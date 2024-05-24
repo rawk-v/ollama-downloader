@@ -55,7 +55,7 @@ git_module_setup() {
         rm -rf ${LLAMACPP_DIR}
     fi
     git submodule init
-    git submodule update --force ${LLAMACPP_DIR}
+    # git submodule update --force ${LLAMACPP_DIR}
 
 }
 
@@ -67,11 +67,11 @@ apply_patches() {
 
     if [ -n "$(ls -A ../patches/*.diff)" ]; then
         # apply temporary patches until fix is upstream
-        for patch in ../patches/*.diff; do
-            for file in $(grep "^+++ " ${patch} | cut -f2 -d' ' | cut -f2- -d/); do
-                (cd ${LLAMACPP_DIR}; git checkout ${file})
-            done
-        done
+        # for patch in ../patches/*.diff; do
+        #     for file in $(grep "^+++ " ${patch} | cut -f2 -d' ' | cut -f2- -d/); do
+        #         (cd ${LLAMACPP_DIR}; git checkout ${file})
+        #     done
+        # done
         for patch in ../patches/*.diff; do
             (cd ${LLAMACPP_DIR} && git apply ${patch})
         done
@@ -107,13 +107,14 @@ compress() {
 
 # Keep the local tree clean after we're done with the build
 cleanup() {
-    (cd ${LLAMACPP_DIR}/ && git checkout CMakeLists.txt)
+    (cd ${LLAMACPP_DIR})
+    # (cd ${LLAMACPP_DIR}/ && git checkout CMakeLists.txt)
 
-    if [ -n "$(ls -A ../patches/*.diff)" ]; then
-        for patch in ../patches/*.diff; do
-            for file in $(grep "^+++ " ${patch} | cut -f2 -d' ' | cut -f2- -d/); do
-                (cd ${LLAMACPP_DIR}; git checkout ${file})
-            done
-        done
-    fi
+    # if [ -n "$(ls -A ../patches/*.diff)" ]; then
+    #     for patch in ../patches/*.diff; do
+    #         for file in $(grep "^+++ " ${patch} | cut -f2 -d' ' | cut -f2- -d/); do
+    #             (cd ${LLAMACPP_DIR}; git checkout ${file})
+    #         done
+    #     done
+    # fi
 }

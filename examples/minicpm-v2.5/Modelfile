@@ -8,7 +8,7 @@ TEMPLATE """{{ if .System }}<|start_header_id|>system<|end_header_id|>
 
 {{ .Response }}<|eot_id|>"""
 PARAMETER stop "<|start_header_id|>"
-PARAMETER stop "<|end_of_text|>"
+PARAMETER stop "<|end_header_id|>"
 PARAMETER stop "<|eot_id|>"
 PARAMETER num_keep 4
 PARAMETER num_ctx 2048

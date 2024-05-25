@@ -1055,6 +1055,48 @@ struct llama_server_context
         return slot.has_next_token; // continue
     }
 
+    std::vector<slot_image> vector_clip_image_u82_slot_image(std::vector<std::vector<clip_image_u8 *>> imgs){
+        std::vector<slot_image> results;
+        int id = 1;
+        if (imgs.size() > 1) {
+            for (size_t i = 1; i < imgs.size(); ++i) {
+                for (size_t j = 0; j < imgs[i].size(); ++j) {
+                    struct slot_image result;
+                    result.id = id++;
+                    result.prefix_prompt = "";
+                    result.img_data = imgs[i][j];
+                    results.push_back(result);
+                }
+            }
+        } 
+        return results;
+    }
+
+    bool process_images_slice(server_slot &slot){
+        auto imgs = slice_image(slot.images[0].img_data);
+        // slot.images = vector_clip_image_u82_slot_image(imgs);
+        auto slice_imgs = vector_clip_image_u82_slot_image(imgs);
+        slot.images.insert(slot.images.end(), slice_imgs.begin(), slice_imgs.end());
+
+        for (slot_image &img : slot.images)
+        {
+            if (!img.request_encode_image)
+            {
+                continue;
+            }
+
+            if (!llava_image_embed_make_with_clip_img(clp_ctx, params.n_threads, img.img_data, &img.image_embedding, &img.image_tokens)) {
+                LOG_TEE("Error processing the given image");
+                return false;
+            }
+
+
+            img.request_encode_image = false;
+        }
+
+        return slot.images.size() > 0;
+    }
+
     bool process_images(server_slot &slot) const
     {
         for (slot_image &img : slot.images)
@@ -1848,8 +1890,9 @@ struct llama_server_context
                                                     {"to_eval", tokens_to_str(ctx, slot.cache_tokens.cbegin() + slot.n_past, slot.cache_tokens.cend())},
                                                 });
 
-                    const bool has_images = process_images(slot);
-
+                    // const bool has_images = process_images(slot);
+                    const bool has_images = process_images_slice(slot);
+                    
                     // process the prefix of first image
                     std::vector<llama_token> prefix_tokens = has_images ? tokenize(slot.images[0].prefix_prompt, add_bos_token) : prompt_tokens;
 

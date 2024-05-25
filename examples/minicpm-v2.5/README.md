@@ -1,7 +1,7 @@
 # MiniCPM-Llama3-V 2.5
 
-Due to the large amount of PRs of Ollama, MiniCPM-Llama3-V 2.5 has not been merged into the official repository. Here is the instructions for running MiniCPM-Llama3-V 2.5 with this fork.
-Feel free to raise issues if you meet any problem, and we will reply as soon as possible.
+We are engaged in preparing a PR for the Ollama official repository! For now, you can run MiniCPM-Llama3-V 2.5 with this fork.
+Feel free to raise issues if you meet any problems, and we will reply as soon as possible.
 
 ## Install Requirements
 

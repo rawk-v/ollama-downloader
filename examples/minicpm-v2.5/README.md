@@ -58,7 +58,7 @@ Start the server:
 
 ## Running 
 
-1. Create a file named `Modelfile` following this [example](examples/minicpm-v2.5/Modelfile). You may have to change to `FROM` field with your local filepaths.
+1. Create a file named `Modelfile` following this [example](Modelfile). You may have to change to `FROM` field with your local filepaths.
 
 2. Create the model in Ollama:
 

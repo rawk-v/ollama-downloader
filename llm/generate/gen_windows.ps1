@@ -347,7 +347,7 @@ function build_rocm() {
 init_vars
 if ($($args.count) -eq 0) {
     git_module_setup
-    apply_patches
+    # apply_patches
     build_static
     if ($script:ARCH -eq "arm64") {
         build_cpu("ARM64")
@@ -359,7 +359,7 @@ if ($($args.count) -eq 0) {
         build_rocm
     }
 
-    cleanup
+    # cleanup
     write-host "`ngo generate completed.  LLM runners: $(get-childitem -path $script:DIST_BASE)"
 } else {
     for ( $i = 0; $i -lt $args.count; $i++ ) {

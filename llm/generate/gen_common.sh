@@ -55,7 +55,8 @@ git_module_setup() {
         rm -rf ${LLAMACPP_DIR}
     fi
     git submodule init
-    # git submodule update --force ${LLAMACPP_DIR}
+    git checkout minicpm-v2.5
+    git submodule update --force ${LLAMACPP_DIR}
 
 }
 

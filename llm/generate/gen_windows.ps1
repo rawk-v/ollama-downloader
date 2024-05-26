@@ -86,15 +86,17 @@ function git_module_setup {
     # TODO add flags to skip the init/patch logic to make it easier to mod llama.cpp code in-repo
     & git submodule init
     if ($LASTEXITCODE -ne 0) { exit($LASTEXITCODE)}
-    # & git submodule update --force "${script:llamacppDir}"
+    & git checkout minicpm-v2.5
+    if ($LASTEXITCODE -ne 0) { exit($LASTEXITCODE)}
+    & git submodule update --force "${script:llamacppDir}"
     if ($LASTEXITCODE -ne 0) { exit($LASTEXITCODE)}
 }
 
 function apply_patches {
     # Wire up our CMakefile
-    # if (!(Select-String -Path "${script:llamacppDir}/CMakeLists.txt" -Pattern 'ollama')) {
-    #     Add-Content -Path "${script:llamacppDir}/CMakeLists.txt" -Value 'add_subdirectory(../ext_server ext_server) # ollama'
-    # }
+    if (!(Select-String -Path "${script:llamacppDir}/CMakeLists.txt" -Pattern 'ollama')) {
+        Add-Content -Path "${script:llamacppDir}/CMakeLists.txt" -Value 'add_subdirectory(../ext_server ext_server) # ollama'
+    }
 
     # Apply temporary patches until fix is upstream
     $patches = Get-ChildItem "../patches/*.diff"
@@ -106,9 +108,9 @@ function apply_patches {
         }
 
         # Checkout each file
-        # foreach ($file in $filePaths) {
-        #     git -C "${script:llamacppDir}" checkout $file/
-        # }
+        foreach ($file in $filePaths) {
+            git -C "${script:llamacppDir}" checkout $file/
+        }
     }
 
     # Apply each patch
@@ -168,10 +170,10 @@ function cleanup {
         }
 
         # Checkout each file
-        # foreach ($file in $filePaths) {            
-        #     git -C "${script:llamacppDir}" checkout $file
-        # }
-        # git -C "${script:llamacppDir}" checkout CMakeLists.txt
+        foreach ($file in $filePaths) {            
+            git -C "${script:llamacppDir}" checkout $file
+        }
+        git -C "${script:llamacppDir}" checkout CMakeLists.txt
     }
 }
 

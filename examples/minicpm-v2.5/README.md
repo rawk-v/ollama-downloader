@@ -16,7 +16,7 @@ Prepare both our [llama.cpp](https://github.com/OpenBMB/llama.cpp.git) fork and 
 ```bash
 git clone -b minicpm-v2.5 https://github.com/OpenBMB/ollama.git
 cd ollama/llm
-git clone -b minicpm-v2.5_for_ollama https://github.com/OpenBMB/llama.cpp.git
+git clone -b minicpm-v2.5 https://github.com/OpenBMB/llama.cpp.git
 cd ../
 ```
 

@@ -1073,11 +1073,6 @@ struct llama_server_context
     }
 
     bool process_images_slice(server_slot &slot){
-        auto imgs = slice_image(slot.images[0].img_data);
-        // slot.images = vector_clip_image_u82_slot_image(imgs);
-        auto slice_imgs = vector_clip_image_u82_slot_image(imgs);
-        slot.images.insert(slot.images.end(), slice_imgs.begin(), slice_imgs.end());
-
         for (slot_image &img : slot.images)
         {
             if (!img.request_encode_image)
@@ -1085,7 +1080,7 @@ struct llama_server_context
                 continue;
             }
 
-            if (!llava_image_embed_make_with_clip_img(clp_ctx, params.n_threads, img.img_data, &img.image_embedding, &img.image_tokens)) {
+            if (!llava_image_embed_make_with_clip_img_ollama(clp_ctx, params.n_threads, img.img_data, &img.image_embedding, &img.image_tokens)) {
                 LOG_TEE("Error processing the given image");
                 return false;
             }

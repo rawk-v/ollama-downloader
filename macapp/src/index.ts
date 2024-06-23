@@ -90,12 +90,12 @@ const assetPath = app.isPackaged ? process.resourcesPath : path.join(__dirname, 
 
 function trayIconPath() {
   return nativeTheme.shouldUseDarkColors
-    ? updateAvailable
-      ? path.join(assetPath, 'iconDarkUpdateTemplate.png')
-      : path.join(assetPath, 'iconDarkTemplate.png')
-    : updateAvailable
-    ? path.join(assetPath, 'iconUpdateTemplate.png')
-    : path.join(assetPath, 'iconTemplate.png')
+      ? updateAvailable
+          ? path.join(assetPath, 'iconDarkUpdateTemplate.png')
+          : path.join(assetPath, 'iconDarkTemplate.png')
+      : updateAvailable
+          ? path.join(assetPath, 'iconUpdateTemplate.png')
+          : path.join(assetPath, 'iconTemplate.png')
 }
 
 function updateTrayIcon() {
@@ -116,6 +116,10 @@ function updateTray() {
 
   const menu = Menu.buildFromTemplate([
     ...(updateAvailable ? updateItems : []),
+    {
+      label: 'Download Models',
+      click: firstRunWindow,
+    },
     { role: 'quit', label: 'Quit Ollama', accelerator: 'Command+Q' },
   ])
 
@@ -135,8 +139,8 @@ let proc: ChildProcess = null
 
 function server() {
   const binary = app.isPackaged
-    ? path.join(process.resourcesPath, 'ollama')
-    : path.resolve(process.cwd(), '..', 'ollama')
+      ? path.join(process.resourcesPath, 'ollama')
+      : path.resolve(process.cwd(), '..', 'ollama')
 
   proc = spawn(binary, ['serve'])
 
@@ -163,7 +167,7 @@ app.on('before-quit', () => {
 })
 
 const updateURL = `https://ollama.com/api/update?os=${process.platform}&arch=${
-  process.arch
+    process.arch
 }&version=${app.getVersion()}&id=${id()}`
 
 let latest = ''
@@ -237,7 +241,7 @@ function init() {
                     type: 'info',
                     message: 'Cannot move to Applications directory',
                     detail:
-                      'Another version of Ollama is currently running from your Applications directory. Close it first and try again.',
+                        'Another version of Ollama is currently running from your Applications directory. Close it first and try again.',
                   })
                 }
                 return true

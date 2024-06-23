@@ -1,25 +1,21 @@
 import { useState } from 'react'
-import copy from 'copy-to-clipboard'
-import { CheckIcon, DocumentDuplicateIcon } from '@heroicons/react/24/outline'
 import Store from 'electron-store'
-import { getCurrentWindow, app } from '@electron/remote'
+import { getCurrentWindow } from '@electron/remote'
 
 import { install } from './install'
 import OllamaIcon from './ollama.svg'
+import DownloadModels from './DownloadModels'
 
 const store = new Store()
 
 enum Step {
   WELCOME = 0,
   CLI,
-  FINISH,
+  DOWNLOAD_MODELS,
 }
 
-export default function () {
-  const [step, setStep] = useState<Step>(Step.WELCOME)
-  const [commandCopied, setCommandCopied] = useState<boolean>(false)
-
-  const command = 'ollama run llama3'
+export default function App() {
+  const [step, setStep] = useState<Step>(store.get('first-time-run', true) ? Step.WELCOME : Step.DOWNLOAD_MODELS)
 
   return (
     <div className='drag'>
@@ -53,7 +49,8 @@ export default function () {
                   onClick={async () => {
                     try {
                       await install()
-                      setStep(Step.FINISH)
+                      store.set('first-time-run', false)
+                      setStep(Step.DOWNLOAD_MODELS)
                     } catch (e) {
                       console.error('could not install: ', e)
                     } finally {
@@ -72,50 +69,7 @@ export default function () {
             </div>
           </>
         )}
-        {step === Step.FINISH && (
-          <>
-            <div className='mx-auto flex flex-col space-y-20 text-center'>
-              <h1 className='mt-4 text-2xl tracking-tight text-gray-900'>Run your first model</h1>
-              <div className='flex flex-col'>
-                <div className='group relative flex items-center'>
-                  <pre className='language-none text-2xs w-full rounded-md bg-gray-100 px-4 py-3 text-start leading-normal'>
-                    {command}
-                  </pre>
-                  <button
-                    className={`no-drag absolute right-[5px] px-2 py-2 ${
-                      commandCopied
-                        ? 'text-gray-900 opacity-100 hover:cursor-auto'
-                        : 'text-gray-200 opacity-50 hover:cursor-pointer'
-                    } hover:font-bold hover:text-gray-900 group-hover:opacity-100`}
-                    onClick={() => {
-                      copy(command)
-                      setCommandCopied(true)
-                      setTimeout(() => setCommandCopied(false), 3000)
-                    }}
-                  >
-                    {commandCopied ? (
-                      <CheckIcon className='h-4 w-4 font-bold text-gray-500' />
-                    ) : (
-                      <DocumentDuplicateIcon className='h-4 w-4 text-gray-500' />
-                    )}
-                  </button>
-                </div>
-                <p className='mx-auto my-4 w-[70%] text-xs text-gray-400'>
-                  Run this command in your favorite terminal.
-                </p>
-              </div>
-              <button
-                onClick={() => {
-                  store.set('first-time-run', true)
-                  window.close()
-                }}
-                className='no-drag rounded-dm mx-auto w-[60%] rounded-md bg-black px-4 py-2 text-sm text-white hover:brightness-110'
-              >
-                Finish
-              </button>
-            </div>
-          </>
-        )}
+        {step === Step.DOWNLOAD_MODELS && <DownloadModels />}
       </div>
     </div>
   )

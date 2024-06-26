@@ -2,7 +2,16 @@
  <img alt="ollama" height="200px" src="https://github.com/ollama/ollama/assets/3325447/0d0b44e2-8f4a-4e99-9b52-a5c1c741c8f7">
 </div>
 
-# Ollama
+# Ollama Download UI
+
+This is a fork of Ollama providing model download UI.
+
+The release containing built app for macOS, bundled with Ollama binary.
+
+## Preview
+<img src="https://miro.medium.com/v2/resize:fit:1400/format:webp/1*B_-MAPXxohZMew07sHkqWA.png" data-canonical-src="https://miro.medium.com/v2/resize:fit:1400/format:webp/1*B_-MAPXxohZMew07sHkqWA.png" height="500" />
+
+---
 
 [![Discord](https://dcbadge.vercel.app/api/server/ollama?style=flat&compact=true)](https://discord.gg/ollama)
 

@@ -88,6 +88,7 @@ function firstRunWindow() {
 
 let tray: Tray | null = null
 let updateAvailable = false
+const enableAutoUpdates = process.env.OLLAMA_ENABLE_AUTO_UPDATES === '1'
 const assetPath = app.isPackaged ? process.resourcesPath : path.join(__dirname, '..', '..', 'assets')
 
 function trayIconPath() {
@@ -214,7 +215,7 @@ async function checkUpdate() {
 }
 
 function init() {
-  if (app.isPackaged) {
+  if (app.isPackaged && enableAutoUpdates) {
     checkUpdate()
     setInterval(() => {
       checkUpdate()
@@ -295,14 +296,16 @@ function id(): string {
   return uuid
 }
 
-autoUpdater.setFeedURL({ url: updateURL })
+if (enableAutoUpdates) {
+  autoUpdater.setFeedURL({ url: updateURL })
 
-autoUpdater.on('error', e => {
-  logger.error(`update check failed - ${e.message}`)
-  console.error(`update check failed - ${e.message}`)
-})
+  autoUpdater.on('error', e => {
+    logger.error(`update check failed - ${e.message}`)
+    console.error(`update check failed - ${e.message}`)
+  })
 
-autoUpdater.on('update-downloaded', () => {
-  updateAvailable = true
-  updateTray()
-})
+  autoUpdater.on('update-downloaded', () => {
+    updateAvailable = true
+    updateTray()
+  })
+}

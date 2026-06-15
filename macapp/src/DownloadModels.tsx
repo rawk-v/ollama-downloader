@@ -1,7 +1,12 @@
 import { useState, useEffect } from 'react'
 import axios from 'axios'
 
-const API_URL = 'http://localhost:11434'
+function apiURL() {
+    const host = process.env.OLLAMA_HOST || 'localhost:11434'
+    return /^https?:\/\//.test(host) ? host : `http://${host}`
+}
+
+const API_URL = apiURL()
 
 type Progress = { [digest: string]: { total: number; completed: number } }
 

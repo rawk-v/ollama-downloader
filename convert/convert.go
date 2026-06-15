@@ -2,199 +2,471 @@ package convert
 
 import (
 	"cmp"
-	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
+	"io/fs"
+	"iter"
 	"log/slog"
+	"maps"
 	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 
-	"google.golang.org/protobuf/proto"
-
-	"github.com/ollama/ollama/convert/sentencepiece"
-	"github.com/ollama/ollama/llm"
+	ofs "github.com/ollama/ollama/fs"
+	"github.com/ollama/ollama/fs/ggml"
 )
 
-const (
-	_ int32 = iota
-	tokenTypeNormal
-	tokenTypeUnknown
-	tokenTypeControl
-	tokenTypeUserDefined
-	tokenTypeUnused
-	tokenTypeByte
-)
+type ModelParameters struct {
+	Architectures []string `json:"architectures"`
+	VocabSize     uint32   `json:"vocab_size"`
 
-type Params struct {
-	Architectures     []string `json:"architectures"`
-	VocabSize         int      `json:"vocab_size"`
-	HiddenSize        int      `json:"hidden_size"`       // n_embd
-	HiddenLayers      int      `json:"num_hidden_layers"` // n_layer
-	ContextSize       int      `json:"max_position_embeddings"`
-	IntermediateSize  int      `json:"intermediate_size"`
-	AttentionHeads    int      `json:"num_attention_heads"` // n_head
-	KeyValHeads       int      `json:"num_key_value_heads"`
-	NormEPS           float64  `json:"rms_norm_eps"`
-	BoSTokenID        int      `json:"bos_token_id"`
-	EoSTokenID        int      `json:"eos_token_id"`
-	HeadDimension     int      `json:"head_dim"`
-	PaddingTokenID    int      `json:"pad_token_id"`
-	RopeFrequencyBase float64  `json:"rope_theta"`
+	// TODO is this needed?
+	ModelType string `json:"model_type"`
 
-	Experts     int `json:"num_local_experts"`
-	ExpertsUsed int `json:"num_experts_per_tok"`
-
-	PreTokenizer string
-
-	ByteOrder
+	TextModel struct {
+		VocabSize  uint32 `json:"vocab_size"`
+		HiddenSize uint32 `json:"hidden_size"`
+		ModelType  string `json:"model_type"`
+	} `json:"text_config"`
 }
 
-type ByteOrder interface {
-	binary.ByteOrder
-	binary.AppendByteOrder
+type AdapterParameters struct {
+	Alpha          uint32 `json:"lora_alpha"`
+	LoraLayers     uint32 `json:"lora_layers"`
+	LoraParameters struct {
+		Rank  uint32  `json:"rank"`
+		Alpha float32 `json:"alpha"`
+		Scale float32 `json:"scale"`
+	} `json:"lora_parameters"`
 }
 
-type ModelArch interface {
-	GetTensors() error
-	LoadVocab() error
-	WriteGGUF(io.WriteSeeker) error
+type KV map[string]any
+
+func (kv KV) Architecture() string {
+	return kv.String("general.architecture", "unknown")
 }
 
-type ModelFormat interface {
-	GetLayerName(string) (string, error)
-	GetTensors(string, *Params) ([]llm.Tensor, error)
-	GetParams(string) (*Params, error)
-	GetModelArch(string, string, *Params) (ModelArch, error)
+type valueTypes interface {
+	uint8 | int8 | uint16 | int16 |
+		uint32 | int32 | uint64 | int64 |
+		string | float32 | float64 | bool
 }
 
-type ModelData struct {
-	Path    string
-	Name    string
-	Params  *Params
-	Vocab   *Vocab
-	Tensors []llm.Tensor
-	Format  ModelFormat
+type arrayValueTypes interface {
+	[]uint8 | []int8 | []uint16 | []int16 |
+		[]uint32 | []int32 | []uint64 | []int64 |
+		[]string | []float32 | []float64 | []bool
 }
 
-func GetModelFormat(dirname string) (ModelFormat, error) {
-	files, err := filepath.Glob(filepath.Join(dirname, "*"))
+func keyValue[T valueTypes | arrayValueTypes](kv KV, key string, defaultValue ...T) (T, bool) {
+	if !strings.HasPrefix(key, "tokenizer.") && !strings.HasPrefix(key, "general.") {
+		key = kv.Architecture() + "." + key
+	}
+
+	if val, ok := kv[key].(T); ok {
+		return val, true
+	}
+	return defaultValue[0], false
+}
+
+func (kv KV) String(key string, defaultValue ...string) string {
+	val, _ := keyValue(kv, key, append(defaultValue, "")...)
+	return val
+}
+
+func (kv KV) Uint(key string, defaultValue ...uint32) uint32 {
+	val, _ := keyValue(kv, key, append(defaultValue, 0)...)
+	return val
+}
+
+func (kv KV) Float(key string, defaultValue ...float32) float32 {
+	val, _ := keyValue(kv, key, append(defaultValue, 0)...)
+	return val
+}
+
+func (kv KV) Bool(key string, defaultValue ...bool) bool {
+	val, _ := keyValue(kv, key, append(defaultValue, false)...)
+	return val
+}
+
+func (kv KV) Strings(key string, defaultValue ...[]string) []string {
+	val, _ := keyValue(kv, key, append(defaultValue, []string{""})...)
+	return val
+}
+
+func (kv KV) Ints(key string, defaultValue ...[]int32) []int32 {
+	val, _ := keyValue(kv, key, append(defaultValue, []int32{0})...)
+	return val
+}
+
+func (kv KV) Uints(key string, defaultValue ...[]uint32) []uint32 {
+	val, _ := keyValue(kv, key, append(defaultValue, []uint32{0})...)
+	return val
+}
+
+func (kv KV) Floats(key string, defaultValue ...[]float32) []float32 {
+	val, _ := keyValue(kv, key, append(defaultValue, []float32{0})...)
+	return val
+}
+
+func (kv KV) Bools(key string, defaultValue ...[]bool) []bool {
+	val, _ := keyValue(kv, key, append(defaultValue, []bool{false})...)
+	return val
+}
+
+func (kv KV) Len() int {
+	return len(kv)
+}
+
+func (kv KV) Keys() iter.Seq[string] {
+	return maps.Keys(kv)
+}
+
+func (kv KV) Value(key string) any {
+	return kv[key]
+}
+
+func (ModelParameters) KV(t *Tokenizer) KV {
+	kv := KV{
+		"general.file_type":            uint32(1),
+		"general.quantization_version": uint32(2),
+		"tokenizer.ggml.pre":           t.Pre,
+		"tokenizer.ggml.model":         t.Vocabulary.Model,
+		"tokenizer.ggml.tokens":        t.Vocabulary.Tokens,
+		"tokenizer.ggml.scores":        t.Vocabulary.Scores,
+		"tokenizer.ggml.token_type":    t.Vocabulary.Types,
+	}
+
+	if len(t.Merges) > 0 {
+		kv["tokenizer.ggml.merges"] = t.Merges
+	}
+
+	if t.Template != "" {
+		kv["tokenizer.chat_template"] = t.Template
+	}
+
+	for _, sv := range t.SpecialVocabulary {
+		if sv.AddTokenSet {
+			kv[fmt.Sprintf("tokenizer.ggml.add_%s_token", sv.Key())] = sv.AddToken
+		}
+		kv[fmt.Sprintf("tokenizer.ggml.%s_token_id", sv.Key())] = uint32(sv.ID)
+		if len(sv.IDs) > 0 {
+			kv[fmt.Sprintf("tokenizer.ggml.%s_token_ids", sv.Key())] = sv.IDs
+		}
+	}
+
+	return kv
+}
+
+func (p AdapterParameters) KV() KV {
+	var alpha float32
+	if p.LoraParameters.Alpha == 0 {
+		alpha = float32(p.Alpha)
+	} else {
+		alpha = p.LoraParameters.Alpha
+	}
+
+	kv := KV{
+		"adapter.lora.alpha": alpha,
+		"adapter.type":       "lora",
+		"general.file_type":  uint32(1),
+		"general.type":       "adapter",
+		"general.version":    "v0.2",
+	}
+
+	return kv
+}
+
+func (ModelParameters) specialTokenTypes() []string {
+	return []string{
+		"bos", "eos", "unk", "sep", "pad", "cls", "mask",
+	}
+}
+
+type ModelKV interface {
+	// KV maps parameters to LLM key-values
+	KV(*Tokenizer) KV
+}
+
+type ModelConverter interface {
+	ModelKV
+
+	// Tensors maps input tensors to LLM tensors. Model specific modifications can be done here.
+	Tensors([]Tensor) []*ggml.Tensor
+	// Replacements returns a list of string pairs to replace in tensor names.
+	// See [strings.Replacer](https://pkg.go.dev/strings#Replacer) for details
+	Replacements() []string
+
+	// specialTokenTypes returns any special token types the model uses
+	specialTokenTypes() []string
+}
+
+// MultimodalConverter splits checkpoints with embedded vision/projector
+// weights into a text model GGUF and a separate projector GGUF.
+type MultimodalConverter interface {
+	ModelConverter
+	TextKV(*Tokenizer) KV
+	TextTensors([]Tensor, *Tokenizer) []*ggml.Tensor
+	ProjectorKV(*Tokenizer) KV
+	ProjectorTensors([]Tensor) []*ggml.Tensor
+}
+
+type moreParser interface {
+	parseMore(fs.FS) error
+}
+
+type extraTensorParser interface {
+	extraTensors(fs.FS) ([]Tensor, error)
+}
+
+type tokenizerAdjuster interface {
+	adjustTokenizer(*Tokenizer)
+}
+
+type tokenizerAwareTensorConverter interface {
+	TensorsWithTokenizer([]Tensor, *Tokenizer) []*ggml.Tensor
+}
+
+type AdapterConverter interface {
+	// KV maps parameters to LLM key-values
+	KV(ofs.Config) KV
+	// Tensors maps input tensors to LLM tensors. Adapter specific modifications can be done here.
+	Tensors([]Tensor) []*ggml.Tensor
+	// Replacements returns a list of string pairs to replace in tensor names.
+	// See [strings.Replacer](https://pkg.go.dev/strings#Replacer) for details
+	Replacements() []string
+}
+
+func ConvertAdapter(fsys fs.FS, f *os.File, baseKV ofs.Config) error {
+	bts, err := fs.ReadFile(fsys, "adapter_config.json")
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	for _, fn := range files {
-		if strings.HasSuffix(fn, ".safetensors") {
-			return &SafetensorFormat{}, nil
-		} else if strings.HasSuffix(fn, ".bin") || strings.HasSuffix(fn, ".pth") {
-			slog.Debug("model is torch")
-			return &TorchFormat{}, nil
-		}
+	var p AdapterParameters
+	if err := json.Unmarshal(bts, &p); err != nil {
+		return err
 	}
 
-	return nil, fmt.Errorf("couldn't determine model format")
-}
+	arch := baseKV.Architecture()
+	if arch == "" {
+		return errors.New("architecture not set for the base model")
+	}
 
-// Details on gguf's tokenizer can be found at:
-// https://github.com/ggerganov/ggml/blob/master/docs/gguf.md#tokenizer
-type Vocab struct {
-	Tokens []string
-	Scores []float32
-	Types  []int32
-	Merges []string
-}
+	var conv AdapterConverter
+	switch arch {
+	case "llama":
+		conv = &llamaAdapter{}
+	case "gemma2":
+		conv = &gemma2Adapter{}
+	default:
+		return errors.New("unsupported architecture")
+	}
 
-func LoadSentencePieceTokens(dirpath string, params *Params) (*Vocab, error) {
-	slog.Info(fmt.Sprintf("reading vocab from %s", filepath.Join(dirpath, "tokenizer.model")))
-	in, err := os.ReadFile(filepath.Join(dirpath, "tokenizer.model"))
+	ts, err := parseTensors(fsys, strings.NewReplacer(conv.Replacements()...))
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	// To regenerate sentencepiece from the protobufs use:
-	// protoc -I=./ --go_out=./ sentencepiece_model.proto
-	modelProto := &sentencepiece.ModelProto{}
-	if err := proto.Unmarshal(in, modelProto); err != nil {
-		return nil, err
+	if err := json.Unmarshal(bts, conv); err != nil {
+		return err
 	}
 
-	v := &Vocab{
-		Tokens: make([]string, 0),
-		Scores: make([]float32, 0),
-		Types:  make([]int32, 0),
+	return writeFile(f, conv.KV(baseKV), conv.Tensors(ts))
+}
+
+func LoadModelMetadata(fsys fs.FS) (ModelKV, *Tokenizer, error) {
+	bts, err := fs.ReadFile(fsys, "config.json")
+	if err != nil {
+		return nil, nil, err
+	}
+	bts = sanitizeNonFiniteJSON(bts)
+
+	var p ModelParameters
+	if err := json.Unmarshal(bts, &p); err != nil {
+		return nil, nil, fmt.Errorf("parse config.json: %w", err)
 	}
 
-	pieces := modelProto.GetPieces()
-	for _, p := range pieces {
-		v.Tokens = append(v.Tokens, p.GetPiece())
-		v.Scores = append(v.Scores, p.GetScore())
-		t := p.GetType()
-		switch t {
-		case sentencepiece.ModelProto_SentencePiece_UNKNOWN:
-		case sentencepiece.ModelProto_SentencePiece_CONTROL:
-		case sentencepiece.ModelProto_SentencePiece_UNUSED:
-		case sentencepiece.ModelProto_SentencePiece_BYTE:
-		default:
-			t = sentencepiece.ModelProto_SentencePiece_NORMAL
+	if len(p.Architectures) < 1 {
+		return nil, nil, errors.New("unknown architecture")
+	}
+
+	var conv ModelConverter
+	switch p.Architectures[0] {
+	case "LlamaForCausalLM":
+		conv = &llamaModel{}
+	case "MllamaForConditionalGeneration":
+		conv = &mllamaModel{}
+	case "Llama4ForConditionalGeneration":
+		conv = &llama4Model{}
+	case "Mistral3ForConditionalGeneration":
+		conv = &mistral3Model{}
+	case "Ministral3ForCausalLM":
+		conv = &mistral3CausalModel{}
+	case "MixtralForCausalLM":
+		conv = &mixtralModel{}
+	case "GemmaForCausalLM":
+		conv = &gemmaModel{}
+	case "Gemma2ForCausalLM":
+		conv = &gemma2Model{}
+	case "Gemma3ForCausalLM", "Gemma3ForConditionalGeneration":
+		conv = &gemma3Model{Architecture: p.Architectures[0]}
+	case "Gemma3TextModel":
+		conv = &embeddingGemmaModel{}
+	case "Gemma3nForConditionalGeneration":
+		conv = &gemma3nModel{}
+	case "Gemma4ForCausalLM", "Gemma4ForConditionalGeneration":
+		conv = &gemma4Model{Architecture: p.Architectures[0]}
+	case "Phi3ForCausalLM":
+		conv = &phi3Model{}
+	case "Qwen2ForCausalLM":
+		conv = &qwen2Model{}
+	case "Qwen2_5_VLForConditionalGeneration":
+		conv = &qwen25VLModel{}
+	case "Qwen3VLForConditionalGeneration", "Qwen3VLMoeForConditionalGeneration":
+		conv = &qwen3VLModel{}
+	case "Olmo3ForCausalLM":
+		conv = &olmoModel{}
+	case "BertModel":
+		conv = &bertModel{}
+	case "NomicBertModel", "NomicBertMoEModel":
+		conv = &nomicbertModel{}
+	case "CohereForCausalLM":
+		conv = &commandrModel{}
+	case "GptOssForCausalLM":
+		conv = &gptossModel{}
+	case "DeepseekOCRForCausalLM":
+		conv = &deepseekocr{}
+	case "DeepseekV3ForCausalLM":
+		conv = &deepseek2Model{}
+	case "Glm4MoeLiteForCausalLM":
+		conv = &glm4MoeLiteModel{}
+	case "LagunaForCausalLM":
+		conv = &lagunaModel{}
+	case "GlmOcrForConditionalGeneration":
+		conv = &glmOcrModel{}
+	case "Lfm2ForCausalLM", "Lfm2MoeForCausalLM":
+		conv = &lfm2Model{}
+	case "Lfm2VlForConditionalGeneration":
+		conv = &lfm2VLTextModel{}
+	case "Qwen3NextForCausalLM", "Qwen3_5ForConditionalGeneration", "Qwen3_5MoeForConditionalGeneration":
+		conv = &qwen3NextModel{}
+	case "NemotronH_Nano_VL_V2", "NemotronH_Nano_Omni_Reasoning_V3":
+		conv = &nemotronHNanoVLModel{}
+	case "NemotronHForCausalLM":
+		conv = &nemotronHModel{}
+	default:
+		return nil, nil, fmt.Errorf("unsupported architecture %q", p.Architectures[0])
+	}
+
+	if err := json.Unmarshal(bts, conv); err != nil {
+		return nil, nil, fmt.Errorf("parse config.json for %q: %w", p.Architectures[0], err)
+	}
+
+	if t, ok := conv.(moreParser); ok {
+		if err := t.parseMore(fsys); err != nil {
+			return nil, nil, err
 		}
-		v.Types = append(v.Types, int32(t))
 	}
 
-	slog.Info(fmt.Sprintf("vocab size: %d", len(v.Tokens)))
-
-	// add any additional tokens
-	addIn, err := os.ReadFile(filepath.Join(dirpath, "added_tokens.json"))
-	if os.IsNotExist(err) {
-		return v, nil
-	} else if err != nil {
-		return nil, err
+	t, err := parseTokenizer(fsys, conv.specialTokenTypes())
+	if err != nil {
+		return nil, nil, err
+	}
+	if ta, ok := conv.(tokenizerAdjuster); ok {
+		ta.adjustTokenizer(t)
 	}
 
-	slog.Info("reading user defined tokens")
+	vocabSize := int(cmp.Or(p.VocabSize, p.TextModel.VocabSize))
 
-	var extraTokenData map[string]int
-	if err := json.Unmarshal(addIn, &extraTokenData); err != nil {
-		return nil, err
-	}
-
-	type token struct {
-		key string
-		pos int
-	}
-
-	extraTokens := make([]token, 0)
-	for k, id := range extraTokenData {
-		extraTokens = append(extraTokens, token{k, id})
-	}
-
-	slices.SortFunc(extraTokens, func(a, b token) int {
-		return cmp.Compare(a.pos, b.pos)
-	})
-
-	numToks := len(v.Tokens)
-
-	for cnt, t := range extraTokens {
-		// the token id should match the specific index for the total number of tokens
-		if t.pos != cnt+numToks {
-			return nil, fmt.Errorf("token ID '%d' for '%s' doesn't match total token size", t.pos, t.key)
+	switch {
+	case vocabSize == 0:
+		slog.Debug("vocabulary size was not explicitly set by the model", "default size", len(t.Vocabulary.Tokens))
+	case vocabSize > len(t.Vocabulary.Tokens):
+		slog.Debug("vocabulary is smaller than expected, padding with dummy tokens", "expect", vocabSize, "actual", len(t.Vocabulary.Tokens))
+		for i := range vocabSize - len(t.Vocabulary.Tokens) {
+			t.Vocabulary.Tokens = append(t.Vocabulary.Tokens, fmt.Sprintf("[PAD%d]", i))
+			t.Vocabulary.Scores = append(t.Vocabulary.Scores, -1)
+			t.Vocabulary.Types = append(t.Vocabulary.Types, tokenTypeUserDefined)
 		}
-		v.Tokens = append(v.Tokens, t.key)
-		v.Scores = append(v.Scores, -1000.0)
-		v.Types = append(v.Types, tokenTypeUserDefined)
+	case vocabSize < len(t.Vocabulary.Tokens):
+		slog.Debug("vocabulary is larger than expected", "want", vocabSize, "got", len(t.Vocabulary.Tokens))
+		p.VocabSize = uint32(len(t.Vocabulary.Tokens))
+		p.TextModel.VocabSize = uint32(len(t.Vocabulary.Tokens))
+	default:
+		slog.Debug("vocabulary", "size", len(t.Vocabulary.Tokens))
 	}
-	slog.Info(fmt.Sprintf("vocab size w/ extra tokens: %d", len(v.Tokens)))
+	return conv, t, nil
+}
 
-	if params.VocabSize > len(v.Tokens) {
-		missingTokens := params.VocabSize - len(v.Tokens)
-		slog.Warn(fmt.Sprintf("vocab is missing %d tokens", missingTokens))
-		for cnt := 0; cnt < missingTokens; cnt++ {
-			v.Tokens = append(v.Tokens, fmt.Sprintf("<dummy%05d>", cnt+1))
-			v.Scores = append(v.Scores, -1)
-			v.Types = append(v.Types, tokenTypeUserDefined)
+// Convert writes an Ollama compatible model to the provided io.WriteSeeker based on configurations
+// and files it finds in the input path.
+// Supported input model formats include safetensors.
+// Supported input tokenizers files include tokenizer.json (preferred) and tokenizer.model.
+func ConvertModel(fsys fs.FS, f *os.File, projectorFiles ...*os.File) error {
+	kv, t, err := LoadModelMetadata(fsys)
+	if err != nil {
+		return err
+	}
+	conv := kv.(ModelConverter)
+
+	ts, err := parseTensors(fsys, strings.NewReplacer(conv.Replacements()...))
+	if err != nil {
+		return err
+	}
+
+	if tp, ok := conv.(extraTensorParser); ok {
+		extra, err := tp.extraTensors(fsys)
+		if err != nil {
+			return err
+		}
+		ts = append(ts, extra...)
+	}
+
+	if err := ensureUniqueTensorNames(ts); err != nil {
+		return err
+	}
+
+	if mc, ok := conv.(MultimodalConverter); ok && len(projectorFiles) > 0 && projectorFiles[0] != nil {
+		projectorTensors := mc.ProjectorTensors(ts)
+		if len(projectorTensors) > 0 {
+			if err := writeFile(f, mc.TextKV(t), mc.TextTensors(ts, t)); err != nil {
+				return err
+			}
+			return writeFile(projectorFiles[0], mc.ProjectorKV(t), projectorTensors)
 		}
 	}
 
-	return v, nil
+	var tensors []*ggml.Tensor
+	if tc, ok := conv.(tokenizerAwareTensorConverter); ok {
+		tensors = tc.TensorsWithTokenizer(ts, t)
+	} else {
+		tensors = conv.Tensors(ts)
+	}
+
+	return writeFile(f, conv.KV(t), tensors)
+}
+
+func ensureUniqueTensorNames(ts []Tensor) error {
+	names := make(map[string]struct{}, len(ts))
+	for _, t := range ts {
+		if _, ok := names[t.Name()]; ok {
+			return fmt.Errorf("duplicate tensor name '%s' was found for this model", t.Name())
+		}
+		names[t.Name()] = struct{}{}
+	}
+	return nil
+}
+
+func writeFile(f *os.File, kv KV, ts []*ggml.Tensor) error {
+	for k, v := range sourceTensorKV(ts) {
+		kv[k] = v
+	}
+
+	for i := range ts {
+		ts[i].Shape = slices.Clone(ts[i].Shape)
+		slices.Reverse(ts[i].Shape)
+	}
+	return ggml.WriteGGUF(f, kv, ts)
 }

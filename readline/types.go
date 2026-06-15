@@ -1,5 +1,7 @@
 package readline
 
+import "strconv"
+
 const (
 	CharNull      = 0
 	CharLineStart = 1
@@ -16,6 +18,7 @@ const (
 	CharCtrlL     = 12
 	CharEnter     = 13
 	CharNext      = 14
+	CharCtrlO     = 15 // Ctrl+O - used for expanding tool output
 	CharPrev      = 16
 	CharBckSearch = 18
 	CharFwdSearch = 19
@@ -41,34 +44,51 @@ const (
 )
 
 const (
-	CursorUp    = "\033[1A"
-	CursorDown  = "\033[1B"
-	CursorRight = "\033[1C"
-	CursorLeft  = "\033[1D"
+	Esc = "\x1b"
 
-	CursorSave    = "\033[s"
-	CursorRestore = "\033[u"
+	CursorSave    = Esc + "[s"
+	CursorRestore = Esc + "[u"
 
-	CursorUpN    = "\033[%dA"
-	CursorDownN  = "\033[%dB"
-	CursorRightN = "\033[%dC"
-	CursorLeftN  = "\033[%dD"
+	CursorEOL  = Esc + "[E"
+	CursorBOL  = Esc + "[1G"
+	CursorHide = Esc + "[?25l"
+	CursorShow = Esc + "[?25h"
 
-	CursorEOL  = "\033[E"
-	CursorBOL  = "\033[1G"
-	CursorHide = "\033[?25l"
-	CursorShow = "\033[?25h"
+	ClearToEOL  = Esc + "[K"
+	ClearLine   = Esc + "[2K"
+	ClearScreen = Esc + "[2J"
+	CursorReset = Esc + "[0;0f"
 
-	ClearToEOL  = "\033[K"
-	ClearLine   = "\033[2K"
-	ClearScreen = "\033[2J"
-	CursorReset = "\033[0;0f"
+	ColorGrey    = Esc + "[38;5;245m"
+	ColorDefault = Esc + "[0m"
 
-	ColorGrey    = "\033[38;5;245m"
-	ColorDefault = "\033[0m"
+	ColorBold = Esc + "[1m"
 
-	StartBracketedPaste = "\033[?2004h"
-	EndBracketedPaste   = "\033[?2004l"
+	StartBracketedPaste = Esc + "[?2004h"
+	EndBracketedPaste   = Esc + "[?2004l"
+)
+
+func CursorUpN(n int) string {
+	return Esc + "[" + strconv.Itoa(n) + "A"
+}
+
+func CursorDownN(n int) string {
+	return Esc + "[" + strconv.Itoa(n) + "B"
+}
+
+func CursorRightN(n int) string {
+	return Esc + "[" + strconv.Itoa(n) + "C"
+}
+
+func CursorLeftN(n int) string {
+	return Esc + "[" + strconv.Itoa(n) + "D"
+}
+
+var (
+	CursorUp    = CursorUpN(1)
+	CursorDown  = CursorDownN(1)
+	CursorRight = CursorRightN(1)
+	CursorLeft  = CursorLeftN(1)
 )
 
 const (

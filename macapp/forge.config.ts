@@ -1,7 +1,6 @@
 import type { ForgeConfig } from '@electron-forge/shared-types'
 import { MakerSquirrel } from '@electron-forge/maker-squirrel'
 import { MakerZIP } from '@electron-forge/maker-zip'
-import { PublisherGithub } from '@electron-forge/publisher-github'
 import { AutoUnpackNativesPlugin } from '@electron-forge/plugin-auto-unpack-natives'
 import { WebpackPlugin } from '@electron-forge/plugin-webpack'
 import * as path from 'path'
@@ -11,6 +10,8 @@ import { mainConfig } from './webpack.main.config'
 import { rendererConfig } from './webpack.renderer.config'
 
 const packageJson = JSON.parse(fs.readFileSync(path.resolve(__dirname, './package.json'), 'utf8'))
+const shouldSign = Boolean(process.env.SIGN)
+const shouldNotarizeApp = Boolean(process.env.APPLE_ID && process.env.APPLE_PASSWORD && process.env.APPLE_TEAM_ID)
 
 const config: ForgeConfig = {
   packagerConfig: {
@@ -18,7 +19,7 @@ const config: ForgeConfig = {
     asar: true,
     icon: './assets/icon.icns',
     extraResource: [
-      '../dist/ollama',
+      path.resolve(__dirname, '../dist/darwin'),
       path.join(__dirname, './assets/iconTemplate.png'),
       path.join(__dirname, './assets/iconTemplate@2x.png'),
       path.join(__dirname, './assets/iconUpdateTemplate.png'),
@@ -28,17 +29,21 @@ const config: ForgeConfig = {
       path.join(__dirname, './assets/iconDarkUpdateTemplate.png'),
       path.join(__dirname, './assets/iconDarkUpdateTemplate@2x.png'),
     ],
-    ...(process.env.SIGN
+    ...(shouldSign
       ? {
           osxSign: {
             identity: process.env.APPLE_IDENTITY,
           },
-          osxNotarize: {
-            tool: 'notarytool',
-            appleId: process.env.APPLE_ID || '',
-            appleIdPassword: process.env.APPLE_PASSWORD || '',
-            teamId: process.env.APPLE_TEAM_ID || '',
-          },
+          ...(shouldNotarizeApp
+            ? {
+                osxNotarize: {
+                  tool: 'notarytool',
+                  appleId: process.env.APPLE_ID || '',
+                  appleIdPassword: process.env.APPLE_PASSWORD || '',
+                  teamId: process.env.APPLE_TEAM_ID || '',
+                },
+              }
+            : {}),
         }
       : {}),
     osxUniversal: {

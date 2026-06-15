@@ -3,25 +3,393 @@ package parser
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"os"
+	"os/user"
+	"path/filepath"
+	"runtime"
+	"slices"
 	"strconv"
 	"strings"
-	"unicode"
+	"sync"
+
+	"golang.org/x/mod/semver"
+	"golang.org/x/sync/errgroup"
+	"golang.org/x/text/encoding/unicode"
+	"golang.org/x/text/transform"
+
+	"github.com/ollama/ollama/api"
 )
 
-type File struct {
+var ErrModelNotFound = errors.New("no Modelfile or safetensors files found")
+
+type Modelfile struct {
 	Commands []Command
 }
 
-func (f File) String() string {
+func (f Modelfile) String() string {
 	var sb strings.Builder
 	for _, cmd := range f.Commands {
 		fmt.Fprintln(&sb, cmd.String())
 	}
 
 	return sb.String()
+}
+
+var deprecatedParameters = []string{
+	"penalize_newline",
+	"low_vram",
+	"f16_kv",
+	"logits_all",
+	"vocab_only",
+	"use_mlock",
+	"mirostat",
+	"mirostat_tau",
+	"mirostat_eta",
+}
+
+// CreateRequest creates a new *api.CreateRequest from an existing Modelfile
+func (f Modelfile) CreateRequest(relativeDir string) (*api.CreateRequest, error) {
+	req := &api.CreateRequest{}
+
+	var messages []api.Message
+	var licenses []string
+	params := make(map[string]any)
+	var modelPaths []string
+	var draftPaths []string
+
+	for _, c := range f.Commands {
+		switch c.Name {
+		case "model":
+			path, err := expandPath(c.Args, relativeDir)
+			if err != nil {
+				return nil, err
+			}
+
+			digestMap, err := fileDigestMap(path)
+			if errors.Is(err, os.ErrNotExist) {
+				req.From = c.Args
+				continue
+			} else if err != nil {
+				return nil, err
+			}
+			if err := rejectMatchingLocalPath("DRAFT", path, draftPaths); err != nil {
+				return nil, err
+			}
+			modelPaths = append(modelPaths, path)
+
+			if req.Files == nil {
+				req.Files = digestMap
+			} else {
+				for k, v := range digestMap {
+					req.Files[k] = v
+				}
+			}
+		case "draft":
+			path, err := expandPath(c.Args, relativeDir)
+			if err != nil {
+				return nil, err
+			}
+
+			digestMap, err := fileDigestMap(path)
+			if err != nil {
+				return nil, err
+			}
+			if err := rejectMatchingLocalPath("DRAFT", path, modelPaths); err != nil {
+				return nil, err
+			}
+			draftPaths = append(draftPaths, path)
+
+			if req.DraftFiles == nil {
+				req.DraftFiles = digestMap
+			} else {
+				for k, v := range digestMap {
+					req.DraftFiles[k] = v
+				}
+			}
+		case "adapter":
+			path, err := expandPath(c.Args, relativeDir)
+			if err != nil {
+				return nil, err
+			}
+
+			digestMap, err := fileDigestMap(path)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Adapters = digestMap
+		case "template":
+			req.Template = c.Args
+		case "system":
+			req.System = c.Args
+		case "license":
+			licenses = append(licenses, c.Args)
+		case "renderer":
+			req.Renderer = c.Args
+		case "parser":
+			req.Parser = c.Args
+		case "requires":
+			// golang.org/x/mod/semver requires "v" prefix
+			requires := c.Args
+			if !strings.HasPrefix(requires, "v") {
+				requires = "v" + requires
+			}
+			if !semver.IsValid(requires) {
+				return nil, fmt.Errorf("requires must be a valid semver (e.g. 0.14.0)")
+			}
+			req.Requires = strings.TrimPrefix(requires, "v")
+		case "message":
+			role, msg, _ := strings.Cut(c.Args, ": ")
+			messages = append(messages, api.Message{Role: role, Content: msg})
+		default:
+			if slices.Contains(deprecatedParameters, c.Name) {
+				fmt.Printf("warning: parameter %s is deprecated\n", c.Name)
+				break
+			}
+
+			ps, err := api.FormatParams(map[string][]string{c.Name: {c.Args}})
+			if err != nil {
+				return nil, err
+			}
+
+			for k, v := range ps {
+				if ks, ok := params[k].([]string); ok {
+					params[k] = append(ks, v.([]string)...)
+				} else if vs, ok := v.([]string); ok {
+					params[k] = vs
+				} else {
+					params[k] = v
+				}
+			}
+		}
+	}
+
+	if len(params) > 0 {
+		req.Parameters = params
+	}
+	if len(messages) > 0 {
+		req.Messages = messages
+	}
+	if len(licenses) > 0 {
+		req.License = licenses
+	}
+
+	return req, nil
+}
+
+func rejectMatchingLocalPath(name, path string, existing []string) error {
+	for _, candidate := range existing {
+		same, err := sameLocalPath(path, candidate)
+		if err != nil {
+			return err
+		}
+		if same {
+			return fmt.Errorf("%s must not reference the same local path as FROM: %s", name, path)
+		}
+	}
+	return nil
+}
+
+func sameLocalPath(a, b string) (bool, error) {
+	aa, err := canonicalLocalPath(a)
+	if err != nil {
+		return false, err
+	}
+	bb, err := canonicalLocalPath(b)
+	if err != nil {
+		return false, err
+	}
+	return aa == bb, nil
+}
+
+func canonicalLocalPath(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	return filepath.EvalSymlinks(abs)
+}
+
+func fileDigestMap(path string) (map[string]string, error) {
+	fl := make(map[string]string)
+
+	fi, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+
+	var files []string
+	if fi.IsDir() {
+		fs, err := filesForModel(path)
+		if err != nil {
+			return nil, err
+		}
+
+		for _, f := range fs {
+			f, err := filepath.EvalSymlinks(f)
+			if err != nil {
+				return nil, err
+			}
+
+			rel, err := filepath.Rel(path, f)
+			if err != nil {
+				return nil, err
+			}
+
+			if !filepath.IsLocal(rel) {
+				if strings.Contains(rel, ".cache") {
+					return nil, fmt.Errorf("insecure path: %s\n\nUse --local-dir <dir> when downloading model to disable caching", rel)
+				}
+				return nil, fmt.Errorf("insecure path: %s", rel)
+			}
+
+			files = append(files, f)
+		}
+	} else {
+		files = []string{path}
+	}
+
+	var mu sync.Mutex
+	var g errgroup.Group
+	g.SetLimit(max(runtime.GOMAXPROCS(0)-1, 1))
+	for _, f := range files {
+		g.Go(func() error {
+			digest, err := digestForFile(f)
+			if err != nil {
+				return err
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+			fl[f] = digest
+			return nil
+		})
+	}
+
+	if err := g.Wait(); err != nil {
+		return nil, err
+	}
+
+	return fl, nil
+}
+
+func digestForFile(filename string) (string, error) {
+	filepath, err := filepath.EvalSymlinks(filename)
+	if err != nil {
+		return "", err
+	}
+
+	bin, err := os.Open(filepath)
+	if err != nil {
+		return "", err
+	}
+	defer bin.Close()
+
+	hash := sha256.New()
+	if _, err := io.Copy(hash, bin); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("sha256:%x", hash.Sum(nil)), nil
+}
+
+func filesForModel(path string) ([]string, error) {
+	detectContentType := func(path string) (string, error) {
+		f, err := os.Open(path)
+		if err != nil {
+			return "", err
+		}
+		defer f.Close()
+
+		var b bytes.Buffer
+		b.Grow(512)
+
+		if _, err := io.CopyN(&b, f, 512); err != nil && !errors.Is(err, io.EOF) {
+			return "", err
+		}
+
+		contentType, _, _ := strings.Cut(http.DetectContentType(b.Bytes()), ";")
+		return contentType, nil
+	}
+
+	glob := func(pattern, contentType string) ([]string, error) {
+		matches, err := filepath.Glob(pattern)
+		if err != nil {
+			return nil, err
+		}
+
+		for _, match := range matches {
+			if ct, err := detectContentType(match); err != nil {
+				return nil, err
+			} else if len(contentType) > 0 && ct != contentType {
+				return nil, fmt.Errorf("invalid content type: expected %s for %s", ct, match)
+			}
+		}
+
+		return matches, nil
+	}
+
+	var files []string
+	// some safetensors files do not properly match "application/octet-stream", so skip checking their contentType
+	if st, _ := glob(filepath.Join(path, "model*.safetensors"), ""); len(st) > 0 {
+		// safetensors files might be unresolved git lfs references; skip if they are
+		// covers model-x-of-y.safetensors, model.fp32-x-of-y.safetensors, model.safetensors
+		files = append(files, st...)
+		nested, err := glob(filepath.Join(path, "*", "model*.safetensors"), "")
+		if err != nil {
+			return nil, err
+		}
+		files = append(files, nested...)
+	} else if st, _ := glob(filepath.Join(path, "consolidated*.safetensors"), ""); len(st) > 0 {
+		// covers consolidated.safetensors
+		files = append(files, st...)
+	} else if pt, _ := glob(filepath.Join(path, "pytorch_model*.bin"), "application/zip"); len(pt) > 0 {
+		// pytorch files might also be unresolved git lfs references; skip if they are
+		// covers pytorch_model-x-of-y.bin, pytorch_model.fp32-x-of-y.bin, pytorch_model.bin
+		files = append(files, pt...)
+	} else if pt, _ := glob(filepath.Join(path, "consolidated*.pth"), "application/zip"); len(pt) > 0 {
+		// pytorch files might also be unresolved git lfs references; skip if they are
+		// covers consolidated.x.pth, consolidated.pth
+		files = append(files, pt...)
+	} else if gg, _ := glob(filepath.Join(path, "*.gguf"), "application/octet-stream"); len(gg) > 0 {
+		// covers gguf files ending in .gguf
+		files = append(files, gg...)
+	} else if gg, _ := glob(filepath.Join(path, "*.bin"), "application/octet-stream"); len(gg) > 0 {
+		// covers gguf files ending in .bin
+		files = append(files, gg...)
+	} else {
+		return nil, ErrModelNotFound
+	}
+
+	// add configuration files, json files are detected as text/plain
+	js, err := glob(filepath.Join(path, "*.json"), "text/plain")
+	if err != nil {
+		return nil, err
+	}
+	files = append(files, js...)
+
+	// bert models require a nested config.json
+	// TODO(mxyng): merge this with the glob above
+	js, err = glob(filepath.Join(path, "**/*.json"), "text/plain")
+	if err != nil {
+		return nil, err
+	}
+	files = append(files, js...)
+
+	// add tokenizer.model if it exists (tokenizer.json is automatically picked up by the previous glob)
+	// tokenizer.model might be a unresolved git lfs reference; error if it is
+	if tks, _ := glob(filepath.Join(path, "tokenizer.model"), "application/octet-stream"); len(tks) > 0 {
+		files = append(files, tks...)
+	} else if tks, _ := glob(filepath.Join(path, "**/tokenizer.model"), "text/plain"); len(tks) > 0 {
+		// some times tokenizer.model is in a subdirectory (e.g. meta-llama/Meta-Llama-3-8B)
+		files = append(files, tks...)
+	}
+
+	return files, nil
 }
 
 type Command struct {
@@ -34,7 +402,7 @@ func (c Command) String() string {
 	switch c.Name {
 	case "model":
 		fmt.Fprintf(&sb, "FROM %s", c.Args)
-	case "license", "template", "system", "adapter":
+	case "license", "template", "system", "adapter", "renderer", "parser", "requires", "draft":
 		fmt.Fprintf(&sb, "%s %s", strings.ToUpper(c.Name), quote(c.Args))
 	case "message":
 		role, message, _ := strings.Cut(c.Args, ": ")
@@ -60,23 +428,33 @@ const (
 var (
 	errMissingFrom        = errors.New("no FROM line")
 	errInvalidMessageRole = errors.New("message role must be one of \"system\", \"user\", or \"assistant\"")
-	errInvalidCommand     = errors.New("command must be one of \"from\", \"license\", \"template\", \"system\", \"adapter\", \"parameter\", or \"message\"")
+	errInvalidCommand     = errors.New("command must be one of \"from\", \"license\", \"template\", \"system\", \"adapter\", \"draft\", \"renderer\", \"parser\", \"parameter\", \"message\", or \"requires\"")
 )
 
-func ParseFile(r io.Reader) (*File, error) {
+type ParserError struct {
+	LineNumber int
+	Msg        string
+}
+
+func (e *ParserError) Error() string {
+	if e.LineNumber > 0 {
+		return fmt.Sprintf("(line %d): %s", e.LineNumber, e.Msg)
+	}
+	return e.Msg
+}
+
+func ParseFile(r io.Reader) (*Modelfile, error) {
 	var cmd Command
 	var curr state
+	var currLine int = 1
 	var b bytes.Buffer
 	var role string
 
-	var lineCount int
-	var linePos int
+	var f Modelfile
 
-	var utf16 bool
+	tr := unicode.BOMOverride(unicode.UTF8.NewDecoder())
+	br := bufio.NewReader(transform.NewReader(r, tr))
 
-	var f File
-
-	br := bufio.NewReader(r)
 	for {
 		r, _, err := br.ReadRune()
 		if errors.Is(err, io.EOF) {
@@ -85,29 +463,18 @@ func ParseFile(r io.Reader) (*File, error) {
 			return nil, err
 		}
 
-		// the utf16 byte order mark will be read as "unreadable" by ReadRune()
-		if isUnreadable(r) && lineCount == 0 && linePos == 0 {
-			utf16 = true
-			continue
-		}
-
-		// skip the second byte if we're reading utf16
-		if utf16 && r == 0 {
-			continue
+		if isNewline(r) {
+			currLine++
 		}
 
 		next, r, err := parseRuneForState(r, curr)
 		if errors.Is(err, io.ErrUnexpectedEOF) {
 			return nil, fmt.Errorf("%w: %s", err, b.String())
 		} else if err != nil {
-			return nil, err
-		}
-
-		if isNewline(r) {
-			lineCount++
-			linePos = 0
-		} else {
-			linePos++
+			return nil, &ParserError{
+				LineNumber: currLine,
+				Msg:        err.Error(),
+			}
 		}
 
 		// process the state transition, some transitions need to be intercepted and redirected
@@ -115,7 +482,10 @@ func ParseFile(r io.Reader) (*File, error) {
 			switch curr {
 			case stateName:
 				if !isValidCommand(b.String()) {
-					return nil, errInvalidCommand
+					return nil, &ParserError{
+						LineNumber: currLine,
+						Msg:        errInvalidCommand.Error(),
+					}
 				}
 
 				// next state sometimes depends on the current buffer value
@@ -136,14 +506,17 @@ func ParseFile(r io.Reader) (*File, error) {
 				cmd.Name = b.String()
 			case stateMessage:
 				if !isValidMessageRole(b.String()) {
-					return nil, errInvalidMessageRole
+					return nil, &ParserError{
+						LineNumber: currLine,
+						Msg:        errInvalidMessageRole.Error(),
+					}
 				}
 
 				role = b.String()
 			case stateComment, stateNil:
 				// pass
 			case stateValue:
-				s, ok := unquote(b.String())
+				s, ok := unquote(strings.TrimSpace(b.String()))
 				if !ok || isSpace(r) {
 					if _, err := b.WriteRune(r); err != nil {
 						return nil, err
@@ -177,7 +550,7 @@ func ParseFile(r io.Reader) (*File, error) {
 	case stateComment, stateNil:
 		// pass; nothing to flush
 	case stateValue:
-		s, ok := unquote(b.String())
+		s, ok := unquote(strings.TrimSpace(b.String()))
 		if !ok {
 			return nil, io.ErrUnexpectedEOF
 		}
@@ -309,19 +682,56 @@ func isNewline(r rune) bool {
 	return r == '\r' || r == '\n'
 }
 
-func isUnreadable(r rune) bool {
-	return r == unicode.ReplacementChar
-}
-
 func isValidMessageRole(role string) bool {
 	return role == "system" || role == "user" || role == "assistant"
 }
 
 func isValidCommand(cmd string) bool {
 	switch strings.ToLower(cmd) {
-	case "from", "license", "template", "system", "adapter", "parameter", "message":
+	case "from", "license", "template", "system", "adapter", "draft", "renderer", "parser", "parameter", "message", "requires":
 		return true
 	default:
 		return false
 	}
+}
+
+func expandPathImpl(path, relativeDir string, currentUserFunc func() (*user.User, error), lookupUserFunc func(string) (*user.User, error)) (string, error) {
+	if filepath.IsAbs(path) || strings.HasPrefix(path, "\\") || strings.HasPrefix(path, "/") {
+		return filepath.Abs(path)
+	} else if strings.HasPrefix(path, "~") {
+		var homeDir string
+
+		if path == "~" || strings.HasPrefix(path, "~/") {
+			// Current user's home directory
+			currentUser, err := currentUserFunc()
+			if err != nil {
+				return "", fmt.Errorf("failed to get current user: %w", err)
+			}
+			homeDir = currentUser.HomeDir
+			path = strings.TrimPrefix(path, "~")
+		} else {
+			// Specific user's home directory
+			parts := strings.SplitN(path[1:], "/", 2)
+			userInfo, err := lookupUserFunc(parts[0])
+			if err != nil {
+				return "", fmt.Errorf("failed to find user '%s': %w", parts[0], err)
+			}
+			homeDir = userInfo.HomeDir
+			if len(parts) > 1 {
+				path = "/" + parts[1]
+			} else {
+				path = ""
+			}
+		}
+
+		path = filepath.Join(homeDir, path)
+	} else {
+		path = filepath.Join(relativeDir, path)
+	}
+
+	return filepath.Abs(path)
+}
+
+func expandPath(path, relativeDir string) (string, error) {
+	return expandPathImpl(path, relativeDir, user.Current, user.Lookup)
 }

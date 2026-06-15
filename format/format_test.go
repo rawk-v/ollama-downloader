@@ -5,7 +5,6 @@ import (
 )
 
 func TestHumanNumber(t *testing.T) {
-
 	type testCase struct {
 		input    uint64
 		expected string
@@ -13,6 +12,9 @@ func TestHumanNumber(t *testing.T) {
 
 	testCases := []testCase{
 		{0, "0"},
+		{999, "999"},
+		{1000, "1K"},
+		{1001, "1K"},
 		{1000000, "1M"},
 		{125000000, "125M"},
 		{500500000, "500.50M"},

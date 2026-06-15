@@ -4,13 +4,15 @@ import Store from 'electron-store'
 import winston from 'winston'
 import 'winston-daily-rotate-file'
 import * as path from 'path'
+import * as remoteMain from '@electron/remote/main'
+import squirrelStartup from 'electron-squirrel-startup'
 
 import { v4 as uuidv4 } from 'uuid'
 import { installed } from './install'
 
-require('@electron/remote/main').initialize()
+remoteMain.initialize()
 
-if (require('electron-squirrel-startup')) {
+if (squirrelStartup) {
   app.quit()
 }
 
@@ -73,7 +75,7 @@ function firstRunWindow() {
     },
   })
 
-  require('@electron/remote/main').enable(welcomeWindow.webContents)
+  remoteMain.enable(welcomeWindow.webContents)
 
   welcomeWindow.loadURL(MAIN_WINDOW_WEBPACK_ENTRY)
   welcomeWindow.on('ready-to-show', () => welcomeWindow.show())
@@ -139,8 +141,8 @@ let proc: ChildProcess = null
 
 function server() {
   const binary = app.isPackaged
-      ? path.join(process.resourcesPath, 'ollama')
-      : path.resolve(process.cwd(), '..', 'ollama')
+      ? path.join(process.resourcesPath, 'darwin', 'ollama')
+      : path.resolve(process.cwd(), '..', 'dist', 'darwin', 'ollama')
 
   proc = spawn(binary, ['serve'])
 

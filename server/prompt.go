@@ -1,221 +1,145 @@
 package server
 
 import (
+	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
-	"text/template"
-	"text/template/parse"
 
 	"github.com/ollama/ollama/api"
+	"github.com/ollama/ollama/llm"
+	"github.com/ollama/ollama/model/renderers"
+	"github.com/ollama/ollama/template"
 )
 
-// isResponseNode checks if the node contains .Response
-func isResponseNode(node *parse.ActionNode) bool {
-	for _, cmd := range node.Pipe.Cmds {
-		for _, arg := range cmd.Args {
-			if fieldNode, ok := arg.(*parse.FieldNode); ok && len(fieldNode.Ident) > 0 {
-				if fieldNode.Ident[0] == "Response" {
-					return true
+type tokenizeFunc func(context.Context, string) ([]int, error)
+
+// chatPrompt accepts a list of messages and returns the prompt and media that should be used for the next chat turn.
+// chatPrompt truncates any messages that exceed the context window of the model, making sure to always include 1) the
+// latest message and 2) system messages
+func chatPrompt(ctx context.Context, m *Model, tokenize tokenizeFunc, opts *api.Options, msgs []api.Message, tools []api.Tool, think *api.ThinkValue, truncate bool) (prompt string, media []llm.MediaData, _ error) {
+	var system []api.Message
+
+	// TODO: This is only a truncation heuristic; llama-server handles the
+	// actual image/media inputs. Replace this with projector/model-aware media
+	// token accounting so image history is neither over-packed nor over-trimmed.
+	// Clip images are represented as 768 tokens, each an embedding.
+	imageNumTokens := 768
+
+	lastMsgIdx := len(msgs) - 1
+	currMsgIdx := 0
+
+	if truncate {
+		// Start with all messages and remove from the front until it fits in context
+		for i := 0; i <= lastMsgIdx; i++ {
+			// Collect system messages from the portion we're about to skip
+			system = make([]api.Message, 0)
+			for j := range i {
+				if msgs[j].Role == "system" {
+					system = append(system, msgs[j])
 				}
 			}
-		}
-	}
-	return false
-}
 
-// formatTemplateForResponse formats the template AST to:
-// 1. remove all nodes after the first .Response (if generate=true)
-// 2. add a .Response node to the end if it doesn't exist
-// TODO(jmorganca): this should recursively cut the template before the first .Response
-func formatTemplateForResponse(tmpl *template.Template, generate bool) {
-	var found bool
-	for i, node := range tmpl.Tree.Root.Nodes {
-		if actionNode, ok := node.(*parse.ActionNode); ok {
-			if isResponseNode(actionNode) {
-				found = true
-				if generate {
-					tmpl.Tree.Root.Nodes = tmpl.Tree.Root.Nodes[:i+1]
-					break
+			p, err := renderPrompt(m, append(system, msgs[i:]...), tools, think)
+			if err != nil {
+				return "", nil, err
+			}
+
+			s, err := tokenize(ctx, p)
+			if err != nil {
+				return "", nil, err
+			}
+
+			ctxLen := len(s)
+			if m.ProjectorPaths != nil {
+				for _, msg := range msgs[i:] {
+					ctxLen += imageNumTokens * len(msg.Images)
 				}
 			}
-		}
-	}
 
-	if !found {
-		// add the response node if it doesn't exist
-		responseFieldNode := &parse.FieldNode{NodeType: parse.NodeField, Ident: []string{"Response"}}
-		responsePipeNode := &parse.PipeNode{NodeType: parse.NodePipe, Cmds: []*parse.CommandNode{{NodeType: parse.NodeCommand, Args: []parse.Node{responseFieldNode}}}}
-		responseActionNode := &parse.ActionNode{NodeType: parse.NodeAction, Pipe: responsePipeNode}
-		tmpl.Tree.Root.Nodes = append(tmpl.Tree.Root.Nodes, responseActionNode)
-	}
-}
-
-// Prompt renders a prompt from a template. If generate is set to true,
-// the response and parts of the template following it are not rendered
-func Prompt(tmpl, system, prompt, response string, generate bool) (string, error) {
-	parsed, err := template.New("").Option("missingkey=zero").Parse(tmpl)
-	if err != nil {
-		return "", err
-	}
-
-	formatTemplateForResponse(parsed, generate)
-
-	vars := map[string]any{
-		"System":   system,
-		"Prompt":   prompt,
-		"Response": response,
-	}
-
-	var sb strings.Builder
-	if err := parsed.Execute(&sb, vars); err != nil {
-		return "", err
-	}
-
-	return sb.String(), nil
-}
-
-func countTokens(tmpl string, system string, prompt string, response string, encode func(string) ([]int, error)) (int, error) {
-	rendered, err := Prompt(tmpl, system, prompt, response, false)
-	if err != nil {
-		return 0, err
-	}
-
-	tokens, err := encode(rendered)
-	if err != nil {
-		slog.Error("failed to encode prompt", "err", err)
-		return 0, err
-	}
-
-	return len(tokens), err
-}
-
-// ChatPrompt builds up a prompt from a series of messages, truncating based on context window size
-func ChatPrompt(tmpl string, messages []api.Message, window int, encode func(string) ([]int, error)) (string, error) {
-	type prompt struct {
-		System   string
-		Prompt   string
-		Response string
-
-		images []int
-		tokens int
-	}
-
-	var p prompt
-
-	// iterate through messages to build up {system,user,response} prompts
-	var imgId int
-	var prompts []prompt
-	for _, msg := range messages {
-		switch strings.ToLower(msg.Role) {
-		case "system":
-			if p.System != "" || p.Prompt != "" || p.Response != "" {
-				prompts = append(prompts, p)
-				p = prompt{}
+			if ctxLen <= opts.NumCtx {
+				currMsgIdx = i
+				break
 			}
 
-			p.System = msg.Content
-		case "user":
-			if p.Prompt != "" || p.Response != "" {
-				prompts = append(prompts, p)
-				p = prompt{}
+			// Must always include at least the last message
+			if i == lastMsgIdx {
+				currMsgIdx = lastMsgIdx
+				break
 			}
-
-			var sb strings.Builder
-			for range msg.Images {
-				fmt.Fprintf(&sb, "[img-%d] ", imgId)
-				p.images = append(p.images, imgId)
-				imgId += 1
-			}
-
-			sb.WriteString(msg.Content)
-			p.Prompt = sb.String()
-		case "assistant":
-			if p.Response != "" {
-				prompts = append(prompts, p)
-				p = prompt{}
-			}
-
-			p.Response = msg.Content
-		default:
-			return "", fmt.Errorf("invalid role: %s, role must be one of [system, user, assistant]", msg.Role)
 		}
 	}
 
-	// add final prompt
-	if p.System != "" || p.Prompt != "" || p.Response != "" {
-		prompts = append(prompts, p)
+	if currMsgIdx > 0 {
+		slog.Debug("truncating input messages which exceed context length", "truncated", len(msgs[currMsgIdx:]))
 	}
 
-	// calculate token lengths for each prompt, estimating 768 tokens per images
-	for i, p := range prompts {
-		tokens, err := countTokens(tmpl, p.System, p.Prompt, p.Response, encode)
-		if err != nil {
-			return "", err
+	renderMsgs := slices.Clone(msgs)
+
+	for cnt, msg := range renderMsgs[currMsgIdx:] {
+		if slices.Contains(m.Config.ModelFamilies, "mllama") && len(msg.Images) > 1 {
+			return "", nil, errors.New("this model only supports one image while more than one image requested")
 		}
 
-		prompts[i].tokens = tokens + len(prompts[i].images)*768
-	}
+		var prefix string
+		prompt := msg.Content
 
-	// truncate images and prompts starting from the beginning of the list
-	// until either one prompt remains or the total tokens fits the context window
-	// TODO (jmorganca): this doesn't account for the context window room required for the response
-	for {
-		var required int
-		for _, p := range prompts {
-			required += p.tokens
+		for _, i := range msg.Images {
+			mediaData := llm.NewMediaData(len(media), i)
+			media = append(media, mediaData)
+
+			if m.Config.Renderer != "" {
+				continue
+			}
+
+			// The prompt marker is still image-named for compatibility with
+			// existing templates and llama-server media marker replacement.
+			imgTag := fmt.Sprintf("[img-%d]", mediaData.ID)
+			if !strings.Contains(prompt, "[img]") {
+				prefix += imgTag
+			} else {
+				prompt = strings.Replace(prompt, "[img]", imgTag, 1)
+			}
 		}
 
-		required += 1 // for bos token
-
-		if required <= window {
-			slog.Debug("prompt now fits in context window", "required", required, "window", window)
-			break
-		}
-
-		prompt := &prompts[0]
-
-		if len(prompt.images) > 1 {
-			img := prompt.images[0]
-			slog.Debug("prompt longer than context window, removing image", "id", img, "required", required, "window", window)
-			prompt.images = prompt.images[1:]
-			prompt.Prompt = strings.Replace(prompt.Prompt, fmt.Sprintf(" [img-%d]", img), "", 1)
-			prompt.tokens -= 768
+		if m.Config.Renderer != "" {
 			continue
 		}
 
-		if len(prompts) > 1 {
-			slog.Debug("required tokens longer than context window, removing first prompt", "prompt", prompts[0].tokens, "required", required, "window", window)
-			system := prompt.System
-			prompts = prompts[1:]
-
-			if system != "" && prompts[0].System == "" {
-				prompts[0].System = system
-
-				tokens, err := countTokens(tmpl, prompts[0].System, prompts[0].Prompt, prompts[0].Response, encode)
-				if err != nil {
-					return "", err
-				}
-
-				prompts[0].tokens = tokens + len(prompts[0].images)*768
-			}
-
-			continue
-		}
-
-		// stop truncating if there's only one prompt left
-		break
+		renderMsgs[currMsgIdx+cnt].Content = prefix + prompt
 	}
 
-	var sb strings.Builder
-	for i, p := range prompts {
-		// last prompt should leave the response unrendered (for completion)
-		rendered, err := Prompt(tmpl, p.System, p.Prompt, p.Response, i == len(prompts)-1)
+	// truncate any messages that do not fit into the context window
+	p, err := renderPrompt(m, append(system, renderMsgs[currMsgIdx:]...), tools, think)
+	if err != nil {
+		return "", nil, err
+	}
+
+	return p, media, nil
+}
+
+func renderPrompt(m *Model, msgs []api.Message, tools []api.Tool, think *api.ThinkValue) (string, error) {
+	if m.Config.Renderer != "" {
+		rendererName := resolveRendererName(m)
+		rendered, err := renderers.RenderWithRenderer(rendererName, msgs, tools, think)
 		if err != nil {
 			return "", err
 		}
-		sb.WriteString(rendered)
+		return rendered, nil
 	}
 
-	return sb.String(), nil
+	var b bytes.Buffer
+	thinkVal := false
+	thinkLevel := ""
+	if think != nil {
+		thinkVal = think.Bool()
+		thinkLevel = think.String()
+	}
+	if err := m.Template.Execute(&b, template.Values{Messages: msgs, Tools: tools, Think: thinkVal, ThinkLevel: thinkLevel, IsThinkSet: think != nil}); err != nil {
+		return "", err
+	}
+	return b.String(), nil
 }

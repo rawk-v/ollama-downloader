@@ -1,10 +1,14 @@
 import * as fs from 'fs'
 import { exec as cbExec } from 'child_process'
+import { app as electronApp } from 'electron'
+import { app as remoteApp } from '@electron/remote'
 import * as path from 'path'
 import { promisify } from 'util'
 
-const app = process && process.type === 'renderer' ? require('@electron/remote').app : require('electron').app
-const ollama = app.isPackaged ? path.join(process.resourcesPath, 'ollama') : path.resolve(process.cwd(), '..', 'ollama')
+const app = process && process.type === 'renderer' ? remoteApp : electronApp
+const ollama = app.isPackaged
+  ? path.join(process.resourcesPath, 'darwin', 'ollama')
+  : path.resolve(process.cwd(), '..', 'dist', 'darwin', 'ollama')
 const exec = promisify(cbExec)
 const symlinkPath = '/usr/local/bin/ollama'
 

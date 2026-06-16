@@ -1,19 +1,27 @@
 <p align="center">
-  <a href="https://ollama.com">
+  <a href="https://github.com/rawk-v/ollama-downloader/releases/latest">
     <img src="https://github.com/ollama/ollama/assets/3325447/0d0b44e2-8f4a-4e99-9b52-a5c1c741c8f7" alt="ollama" width="200"/>
   </a>
 </p>
 
-# Ollama Download UI
+# Ollama Downloader
 
-This is a fork of Ollama providing model download UI.
+Ollama Downloader is a macOS-focused fork of Ollama that bundles the Ollama service with a native Electron model manager. It lets users start the service, search the official Ollama library, download and delete models, and inspect local models without using the CLI.
 
-The release containing built app for macOS, bundled with Ollama binary.
+Latest release: [Ollama Downloader v0.30.9](https://github.com/rawk-v/ollama-downloader/releases/tag/ollama-downloader-v0.30.9), bundled with Ollama 0.30.9.
 
-## Preview
-<img src="https://miro.medium.com/v2/resize:fit:1400/format:webp/1*B_-MAPXxohZMew07sHkqWA.png" data-canonical-src="https://miro.medium.com/v2/resize:fit:1400/format:webp/1*B_-MAPXxohZMew07sHkqWA.png" height="500" />
+[Download the notarized macOS DMG](https://github.com/rawk-v/ollama-downloader/releases/latest/download/Ollama-Downloader-0.30.9-arm64.dmg)
+
+## Downloader highlights
+
+- Native macOS-style model manager with light and dark theme support.
+- Official Ollama Library search with tag selection and paginated results.
+- Model download, progress display, local model listing, and delete actions.
+- Bundled Ollama service using the standard `~/.ollama/models` path by default.
 
 ---
+
+# Ollama
 
 Start building with open models.
 

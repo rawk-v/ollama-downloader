@@ -1,5 +1,5 @@
 import { spawn, ChildProcess } from 'child_process'
-import { app, autoUpdater, dialog, Tray, Menu, BrowserWindow, MenuItemConstructorOptions, nativeTheme } from 'electron'
+import { app, autoUpdater, dialog, ipcMain, Tray, Menu, BrowserWindow, MenuItemConstructorOptions, nativeTheme } from 'electron'
 import Store from 'electron-store'
 import winston from 'winston'
 import 'winston-daily-rotate-file'
@@ -9,8 +9,10 @@ import squirrelStartup from 'electron-squirrel-startup'
 
 import { v4 as uuidv4 } from 'uuid'
 import { installed } from './install'
+import { registerLibraryHandlers } from './library'
 
 remoteMain.initialize()
+registerLibraryHandlers()
 
 if (squirrelStartup) {
   app.quit()
@@ -21,6 +23,23 @@ const store = new Store()
 let welcomeWindow: BrowserWindow | null = null
 
 declare const MAIN_WINDOW_WEBPACK_ENTRY: string
+
+function modelsPath() {
+  return process.env.OLLAMA_MODELS || path.join(app.getPath('home'), '.ollama', 'models')
+}
+
+function runtimeInfo() {
+  const home = app.getPath('home')
+  const modelPath = modelsPath()
+
+  return {
+    host: process.env.OLLAMA_HOST || 'localhost:11434',
+    modelsPath: modelPath,
+    displayModelsPath: modelPath.startsWith(home) ? `~${modelPath.slice(home.length)}` : modelPath,
+  }
+}
+
+ipcMain.handle('ollama-runtime:info', () => runtimeInfo())
 
 const logger = winston.createLogger({
   transports: [
@@ -62,11 +81,15 @@ app.on('ready', () => {
 function firstRunWindow() {
   // Create the browser window.
   welcomeWindow = new BrowserWindow({
-    width: 400,
-    height: 500,
-    frame: false,
+    width: 760,
+    height: 640,
+    minWidth: 620,
+    minHeight: 520,
+    titleBarStyle: 'hiddenInset',
+    trafficLightPosition: { x: 18, y: 18 },
+    backgroundColor: nativeTheme.shouldUseDarkColors ? '#0b0b0c' : '#f5f5f7',
     fullscreenable: false,
-    resizable: false,
+    resizable: true,
     movable: true,
     show: false,
     webPreferences: {
@@ -145,7 +168,12 @@ function server() {
       ? path.join(process.resourcesPath, 'darwin', 'ollama')
       : path.resolve(process.cwd(), '..', 'dist', 'darwin', 'ollama')
 
-  proc = spawn(binary, ['serve'])
+  proc = spawn(binary, ['serve'], {
+    env: {
+      ...process.env,
+      OLLAMA_MODELS: modelsPath(),
+    },
+  })
 
   proc.stdout.on('data', data => {
     logger.info(data.toString().trim())

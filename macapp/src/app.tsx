@@ -18,8 +18,8 @@ export default function App() {
   const [step, setStep] = useState<Step>(store.get('first-time-run', true) ? Step.WELCOME : Step.DOWNLOAD_MODELS)
 
   return (
-    <div className='drag'>
-      <div className='mx-auto flex min-h-screen w-full flex-col justify-between bg-white px-4 pt-16'>
+    <div className='app-root drag'>
+      <div className='app-shell'>
         {step === Step.WELCOME && (
           <>
             <div className='mx-auto text-center'>

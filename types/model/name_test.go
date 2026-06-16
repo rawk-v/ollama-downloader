@@ -32,10 +32,11 @@ func TestParseNameParts(t *testing.T) {
 		{
 			in: "scheme://host:port/namespace/model:tag",
 			want: Name{
-				Host:      "host:port",
-				Namespace: "namespace",
-				Model:     "model",
-				Tag:       "tag",
+				Host:           "host:port",
+				Namespace:      "namespace",
+				Model:          "model",
+				Tag:            "tag",
+				ProtocolScheme: "scheme",
 			},
 			wantFilepath: filepath.Join("host:port", "namespace", "model", "tag"),
 		},
@@ -122,21 +123,6 @@ func TestParseNameParts(t *testing.T) {
 			},
 			wantFilepath: filepath.Join(part350, part80, part80, part80),
 		},
-		{
-			in: "@digest",
-			want: Name{
-				RawDigest: "digest",
-			},
-			wantValidDigest: false,
-		},
-		{
-			in: "model@sha256:123",
-			want: Name{
-				Model:     "model",
-				RawDigest: "sha256:123",
-			},
-			wantValidDigest: true,
-		},
 	}
 
 	for _, tt := range cases {
@@ -160,22 +146,18 @@ var testCases = map[string]bool{ // name -> valid
 	"_why/_the/_lucky:_stiff": true,
 
 	// minimal
-	"h/n/m:t@d": true,
+	"h/n/m:t": true,
 
 	"host/namespace/model:tag": true,
 	"host/namespace/model":     false,
 	"namespace/model":          false,
 	"model":                    false,
-	"@sha256-1000000000000000000000000000000000000000000000000000000000000000":      false,
-	"model@sha256-1000000000000000000000000000000000000000000000000000000000000000": false,
-	"model@sha256:1000000000000000000000000000000000000000000000000000000000000000": false,
 
 	// long (but valid)
 	part80 + "/" + part80 + "/" + part80 + ":" + part80:  true,
 	part350 + "/" + part80 + "/" + part80 + ":" + part80: true,
 
-	"h/nn/mm:t@sha256-1000000000000000000000000000000000000000000000000000000000000000": true, // bare minimum part sizes
-	"h/nn/mm:t@sha256:1000000000000000000000000000000000000000000000000000000000000000": true, // bare minimum part sizes
+	"h/nn/mm:t": true, // bare minimum part sizes
 
 	// unqualified
 	"m":     false,
@@ -196,11 +178,10 @@ var testCases = map[string]bool{ // name -> valid
 	"@":      false,
 
 	// not starting with alphanum
-	"-hh/nn/mm:tt@dd": false,
-	"hh/-nn/mm:tt@dd": false,
-	"hh/nn/-mm:tt@dd": false,
-	"hh/nn/mm:-tt@dd": false,
-	"hh/nn/mm:tt@-dd": false,
+	"-hh/nn/mm:tt": false,
+	"hh/-nn/mm:tt": false,
+	"hh/nn/-mm:tt": false,
+	"hh/nn/mm:-tt": false,
 
 	// hosts
 	"host:https/namespace/model:tag": true,
@@ -334,7 +315,7 @@ func FuzzName(f *testing.F) {
 	f.Fuzz(func(t *testing.T, s string) {
 		n := ParseNameBare(s)
 		if n.IsValid() {
-			parts := [...]string{n.Host, n.Namespace, n.Model, n.Tag, n.RawDigest}
+			parts := [...]string{n.Host, n.Namespace, n.Model, n.Tag}
 			for _, part := range parts {
 				if part == ".." {
 					t.Errorf("unexpected .. as valid part")

@@ -1,16 +1,20 @@
 import { spawn, ChildProcess } from 'child_process'
-import { app, autoUpdater, dialog, Tray, Menu, BrowserWindow, MenuItemConstructorOptions, nativeTheme } from 'electron'
+import { app, autoUpdater, dialog, ipcMain, Tray, Menu, BrowserWindow, MenuItemConstructorOptions, nativeTheme } from 'electron'
 import Store from 'electron-store'
 import winston from 'winston'
 import 'winston-daily-rotate-file'
 import * as path from 'path'
+import * as remoteMain from '@electron/remote/main'
+import squirrelStartup from 'electron-squirrel-startup'
 
 import { v4 as uuidv4 } from 'uuid'
 import { installed } from './install'
+import { registerLibraryHandlers } from './library'
 
-require('@electron/remote/main').initialize()
+remoteMain.initialize()
+registerLibraryHandlers()
 
-if (require('electron-squirrel-startup')) {
+if (squirrelStartup) {
   app.quit()
 }
 
@@ -19,6 +23,23 @@ const store = new Store()
 let welcomeWindow: BrowserWindow | null = null
 
 declare const MAIN_WINDOW_WEBPACK_ENTRY: string
+
+function modelsPath() {
+  return process.env.OLLAMA_MODELS || path.join(app.getPath('home'), '.ollama', 'models')
+}
+
+function runtimeInfo() {
+  const home = app.getPath('home')
+  const modelPath = modelsPath()
+
+  return {
+    host: process.env.OLLAMA_HOST || 'localhost:11434',
+    modelsPath: modelPath,
+    displayModelsPath: modelPath.startsWith(home) ? `~${modelPath.slice(home.length)}` : modelPath,
+  }
+}
+
+ipcMain.handle('ollama-runtime:info', () => runtimeInfo())
 
 const logger = winston.createLogger({
   transports: [
@@ -60,11 +81,15 @@ app.on('ready', () => {
 function firstRunWindow() {
   // Create the browser window.
   welcomeWindow = new BrowserWindow({
-    width: 400,
-    height: 500,
-    frame: false,
+    width: 760,
+    height: 640,
+    minWidth: 620,
+    minHeight: 520,
+    titleBarStyle: 'hiddenInset',
+    trafficLightPosition: { x: 18, y: 18 },
+    backgroundColor: nativeTheme.shouldUseDarkColors ? '#0b0b0c' : '#f5f5f7',
     fullscreenable: false,
-    resizable: false,
+    resizable: true,
     movable: true,
     show: false,
     webPreferences: {
@@ -73,7 +98,7 @@ function firstRunWindow() {
     },
   })
 
-  require('@electron/remote/main').enable(welcomeWindow.webContents)
+  remoteMain.enable(welcomeWindow.webContents)
 
   welcomeWindow.loadURL(MAIN_WINDOW_WEBPACK_ENTRY)
   welcomeWindow.on('ready-to-show', () => welcomeWindow.show())
@@ -86,16 +111,17 @@ function firstRunWindow() {
 
 let tray: Tray | null = null
 let updateAvailable = false
+const enableAutoUpdates = process.env.OLLAMA_ENABLE_AUTO_UPDATES === '1'
 const assetPath = app.isPackaged ? process.resourcesPath : path.join(__dirname, '..', '..', 'assets')
 
 function trayIconPath() {
   return nativeTheme.shouldUseDarkColors
-    ? updateAvailable
-      ? path.join(assetPath, 'iconDarkUpdateTemplate.png')
-      : path.join(assetPath, 'iconDarkTemplate.png')
-    : updateAvailable
-    ? path.join(assetPath, 'iconUpdateTemplate.png')
-    : path.join(assetPath, 'iconTemplate.png')
+      ? updateAvailable
+          ? path.join(assetPath, 'iconDarkUpdateTemplate.png')
+          : path.join(assetPath, 'iconDarkTemplate.png')
+      : updateAvailable
+          ? path.join(assetPath, 'iconUpdateTemplate.png')
+          : path.join(assetPath, 'iconTemplate.png')
 }
 
 function updateTrayIcon() {
@@ -116,6 +142,10 @@ function updateTray() {
 
   const menu = Menu.buildFromTemplate([
     ...(updateAvailable ? updateItems : []),
+    {
+      label: 'Download Models',
+      click: firstRunWindow,
+    },
     { role: 'quit', label: 'Quit Ollama', accelerator: 'Command+Q' },
   ])
 
@@ -135,10 +165,15 @@ let proc: ChildProcess = null
 
 function server() {
   const binary = app.isPackaged
-    ? path.join(process.resourcesPath, 'ollama')
-    : path.resolve(process.cwd(), '..', 'ollama')
+      ? path.join(process.resourcesPath, 'darwin', 'ollama')
+      : path.resolve(process.cwd(), '..', 'dist', 'darwin', 'ollama')
 
-  proc = spawn(binary, ['serve'])
+  proc = spawn(binary, ['serve'], {
+    env: {
+      ...process.env,
+      OLLAMA_MODELS: modelsPath(),
+    },
+  })
 
   proc.stdout.on('data', data => {
     logger.info(data.toString().trim())
@@ -163,7 +198,7 @@ app.on('before-quit', () => {
 })
 
 const updateURL = `https://ollama.com/api/update?os=${process.platform}&arch=${
-  process.arch
+    process.arch
 }&version=${app.getVersion()}&id=${id()}`
 
 let latest = ''
@@ -208,7 +243,7 @@ async function checkUpdate() {
 }
 
 function init() {
-  if (app.isPackaged) {
+  if (app.isPackaged && enableAutoUpdates) {
     checkUpdate()
     setInterval(() => {
       checkUpdate()
@@ -237,7 +272,7 @@ function init() {
                     type: 'info',
                     message: 'Cannot move to Applications directory',
                     detail:
-                      'Another version of Ollama is currently running from your Applications directory. Close it first and try again.',
+                        'Another version of Ollama is currently running from your Applications directory. Close it first and try again.',
                   })
                 }
                 return true
@@ -289,14 +324,16 @@ function id(): string {
   return uuid
 }
 
-autoUpdater.setFeedURL({ url: updateURL })
+if (enableAutoUpdates) {
+  autoUpdater.setFeedURL({ url: updateURL })
 
-autoUpdater.on('error', e => {
-  logger.error(`update check failed - ${e.message}`)
-  console.error(`update check failed - ${e.message}`)
-})
+  autoUpdater.on('error', e => {
+    logger.error(`update check failed - ${e.message}`)
+    console.error(`update check failed - ${e.message}`)
+  })
 
-autoUpdater.on('update-downloaded', () => {
-  updateAvailable = true
-  updateTray()
-})
+  autoUpdater.on('update-downloaded', () => {
+    updateAvailable = true
+    updateTray()
+  })
+}

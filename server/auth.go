@@ -50,10 +50,15 @@ func (r registryChallenge) URL() (*url.URL, error) {
 	return redirectURL, nil
 }
 
-func getAuthorizationToken(ctx context.Context, challenge registryChallenge) (string, error) {
+func getAuthorizationToken(ctx context.Context, challenge registryChallenge, originalHost string) (string, error) {
 	redirectURL, err := challenge.URL()
 	if err != nil {
 		return "", err
+	}
+
+	// Validate that the realm host matches the original request host to prevent sending tokens cross-origin.
+	if redirectURL.Host != originalHost {
+		return "", fmt.Errorf("realm host %q does not match original host %q", redirectURL.Host, originalHost)
 	}
 
 	sha256sum := sha256.Sum256(nil)
@@ -67,7 +72,7 @@ func getAuthorizationToken(ctx context.Context, challenge registryChallenge) (st
 
 	headers.Add("Authorization", signature)
 
-	response, err := makeRequest(ctx, http.MethodGet, redirectURL, headers, nil, nil)
+	response, err := makeRequest(ctx, http.MethodGet, redirectURL, headers, nil, &registryOptions{})
 	if err != nil {
 		return "", err
 	}

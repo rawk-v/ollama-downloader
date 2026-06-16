@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"path/filepath"
 	"strings"
 )
@@ -35,22 +36,25 @@ func Unqualified(n Name) error {
 const MissingPart = "!MISSING!"
 
 const (
-	defaultHost      = "registry.ollama.ai"
-	defaultNamespace = "library"
-	defaultTag       = "latest"
+	defaultHost           = "registry.ollama.ai"
+	defaultNamespace      = "library"
+	defaultTag            = "latest"
+	defaultProtocolScheme = "https"
 )
 
 // DefaultName returns a name with the default values for the host, namespace,
-// and tag parts. The model and digest parts are empty.
+// tag, and protocol scheme parts. The model and digest parts are empty.
 //
 //   - The default host is ("registry.ollama.ai")
 //   - The default namespace is ("library")
 //   - The default tag is ("latest")
+//   - The default protocol scheme is ("https")
 func DefaultName() Name {
 	return Name{
-		Host:      defaultHost,
-		Namespace: defaultNamespace,
-		Tag:       defaultTag,
+		Host:           defaultHost,
+		Namespace:      defaultNamespace,
+		Tag:            defaultTag,
+		ProtocolScheme: defaultProtocolScheme,
 	}
 }
 
@@ -87,11 +91,11 @@ func (k partKind) String() string {
 // It is not guaranteed to be valid. Use [Name.IsValid] to check if the name
 // is valid.
 type Name struct {
-	Host      string
-	Namespace string
-	Model     string
-	Tag       string
-	RawDigest string
+	Host           string
+	Namespace      string
+	Model          string
+	Tag            string
+	ProtocolScheme string
 }
 
 // ParseName parses and assembles a Name from a name string. The
@@ -143,11 +147,6 @@ func ParseNameBare(s string) Name {
 	var n Name
 	var promised bool
 
-	s, n.RawDigest, promised = cutLast(s, "@")
-	if promised && n.RawDigest == "" {
-		n.RawDigest = MissingPart
-	}
-
 	// "/" is an illegal tag character, so we can use it to split the host
 	if strings.LastIndex(s, ":") > strings.LastIndex(s, "/") {
 		s, n.Tag, _ = cutPromised(s, ":")
@@ -166,7 +165,9 @@ func ParseNameBare(s string) Name {
 	}
 
 	scheme, host, ok := strings.Cut(s, "://")
-	if !ok {
+	if ok {
+		n.ProtocolScheme = scheme
+	} else {
 		host = scheme
 	}
 	n.Host = host
@@ -195,12 +196,13 @@ func ParseNameFromFilepath(s string) (n Name) {
 	return n
 }
 
-// Merge merges the host, namespace, and tag parts of the two names,
+// Merge merges the host, namespace, tag, and protocol scheme parts of the two names,
 // preferring the non-empty parts of a.
 func Merge(a, b Name) Name {
 	a.Host = cmp.Or(a.Host, b.Host)
 	a.Namespace = cmp.Or(a.Namespace, b.Namespace)
 	a.Tag = cmp.Or(a.Tag, b.Tag)
+	a.ProtocolScheme = cmp.Or(a.ProtocolScheme, b.ProtocolScheme)
 	return a
 }
 
@@ -222,23 +224,19 @@ func (n Name) String() string {
 		b.WriteByte(':')
 		b.WriteString(n.Tag)
 	}
-	if n.RawDigest != "" {
-		b.WriteByte('@')
-		b.WriteString(n.RawDigest)
-	}
 	return b.String()
 }
 
-// DisplayShort returns a short string version of the name.
+// DisplayShortest returns a short string version of the name.
 func (n Name) DisplayShortest() string {
 	var sb strings.Builder
 
-	if n.Host != defaultHost {
+	if !strings.EqualFold(n.Host, defaultHost) {
 		sb.WriteString(n.Host)
 		sb.WriteByte('/')
 		sb.WriteString(n.Namespace)
 		sb.WriteByte('/')
-	} else if n.Namespace != defaultNamespace {
+	} else if !strings.EqualFold(n.Namespace, defaultNamespace) {
 		sb.WriteString(n.Namespace)
 		sb.WriteByte('/')
 	}
@@ -250,23 +248,25 @@ func (n Name) DisplayShortest() string {
 	return sb.String()
 }
 
-func IsValidNamespace(namespace string) bool {
-	return isValidPart(kindNamespace, namespace)
+// IsValidNamespace reports whether the provided string is a valid
+// namespace.
+func IsValidNamespace(s string) bool {
+	return isValidPart(kindNamespace, s)
 }
 
 // IsValid reports whether all parts of the name are present and valid. The
 // digest is a special case, and is checked for validity only if present.
+//
+// Note: The digest check has been removed as is planned to be added back in
+// at a later time.
 func (n Name) IsValid() bool {
-	if n.RawDigest != "" && !isValidPart(kindDigest, n.RawDigest) {
-		return false
-	}
 	return n.IsFullyQualified()
 }
 
 // IsFullyQualified returns true if all parts of the name are present and
 // valid without the digest.
 func (n Name) IsFullyQualified() bool {
-	var parts = []string{
+	parts := []string{
 		n.Host,
 		n.Namespace,
 		n.Model,
@@ -304,6 +304,30 @@ func (n Name) Filepath() string {
 // LogValue returns a slog.Value that represents the name as a string.
 func (n Name) LogValue() slog.Value {
 	return slog.StringValue(n.String())
+}
+
+func (n Name) EqualFold(o Name) bool {
+	return strings.EqualFold(n.Host, o.Host) &&
+		strings.EqualFold(n.Namespace, o.Namespace) &&
+		strings.EqualFold(n.Model, o.Model) &&
+		strings.EqualFold(n.Tag, o.Tag)
+}
+
+// BaseURL returns the base URL for the registry.
+func (n Name) BaseURL() *url.URL {
+	return &url.URL{
+		Scheme: n.ProtocolScheme,
+		Host:   n.Host,
+	}
+}
+
+// DisplayNamespaceModel returns the namespace and model joined by "/".
+func (n Name) DisplayNamespaceModel() string {
+	var b strings.Builder
+	b.WriteString(n.Namespace)
+	b.WriteByte('/')
+	b.WriteString(n.Model)
+	return b.String()
 }
 
 func isValidLen(kind partKind, s string) bool {

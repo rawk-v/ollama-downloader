@@ -1,150 +1,187 @@
 # Development
 
-Install required tools:
+Install prerequisites:
 
-- cmake version 3.24 or higher
-- go version 1.22 or higher
-- gcc version 11.4.0 or higher
+- [Go](https://go.dev/doc/install)
+- [CMake](https://cmake.org/download/) 3.24 or newer
+- C/C++ compiler: Clang on macOS, Visual Studio 2022 C++ tools on Windows, or GCC/Clang on Linux
+- [Ninja](https://github.com/ninja-build/ninja/releases) in `PATH` is recommended, especially on Windows
 
-### MacOS
+For pure Go iteration against an existing native payload, run Ollama from the repository root:
 
-```bash
-brew install go cmake gcc
+```shell
+go run . serve
 ```
 
-Optionally enable debugging and more verbose logging:
+> [!NOTE]
+> Ollama includes native code compiled with CGO.  From time to time these data structures can change and CGO can get out of sync resulting in unexpected crashes.  You can force a full build of the native code by running `go clean -cache` first. 
 
-```bash
-# At build time
-export CGO_CFLAGS="-g"
+## Native build model
 
-# At runtime
-export OLLAMA_DEBUG=1
+For a fresh checkout, or after changing native code, build from the repository root. On macOS arm64, this builds Metal inference. On all other platforms this builds CPU-only inference. It builds the Go binary at the repository root and installs the native runtime payload under `build/lib/ollama`.
+
+```shell
+cmake -B build .
+cmake --build build --parallel 8
+./ollama serve
 ```
 
-Get the required libraries and build the native LLM code:
+To install into a standard prefix layout:
 
-```bash
-go generate ./...
+```shell
+cmake --install build --prefix /path/to/install
 ```
 
-Then build ollama:
+On all platforms except macOS arm64, to build GPU backends select the backends explicitly:
 
-```bash
-go build .
+```shell
+cmake -B build . -DOLLAMA_LLAMA_BACKENDS="cuda_v13;vulkan"
+cmake --build build --parallel 8
 ```
 
-Now you can run `ollama`:
+Supported backend values are `cuda_v12`, `cuda_v13`, `rocm_v7_1`, `rocm_v7_2`, `vulkan`, `cuda_jetpack5`, and `cuda_jetpack6`.
 
-```bash
-./ollama
+Use standard CMake architecture overrides to narrow GPU builds for local hardware:
+
+```shell
+# CUDA
+cmake -B build . -DOLLAMA_LLAMA_BACKENDS=cuda_v13 -DCMAKE_CUDA_ARCHITECTURES=native
+
+# ROCm / HIP
+cmake -B build . -DOLLAMA_LLAMA_BACKENDS=rocm_v7_2 -DCMAKE_HIP_ARCHITECTURES=gfx1100
 ```
 
-### Linux
+You can tune GGML build options by setting `GGML_*` values during configure. For example, to build CUDA v12 for Pascal without flash attention kernels:
 
-#### Linux CUDA (NVIDIA)
-
-_Your operating system distribution may already have packages for NVIDIA CUDA. Distro packages are often preferable, but instructions are distro-specific. Please consult distro-specific docs for dependencies if available!_
-
-Install `cmake` and `golang` as well as [NVIDIA CUDA](https://developer.nvidia.com/cuda-downloads)
-development and runtime packages.
-
-Typically the build scripts will auto-detect CUDA, however, if your Linux distro
-or installation approach uses unusual paths, you can specify the location by
-specifying an environment variable `CUDA_LIB_DIR` to the location of the shared
-libraries, and `CUDACXX` to the location of the nvcc compiler. You can customize
-a set of target CUDA architectures by setting `CMAKE_CUDA_ARCHITECTURES` (e.g. "50;60;70")
-
-Then generate dependencies:
-
-```
-go generate ./...
+```shell
+cmake -B build . -DOLLAMA_LLAMA_BACKENDS=cuda_v12 -DCMAKE_CUDA_ARCHITECTURES=61 -DGGML_CUDA_FA=OFF
 ```
 
-Then build the binary:
+## macOS (Apple Silicon)
 
-```
-go build .
-```
+Additional prerequisites:
 
-#### Linux ROCm (AMD)
+MLX Metal requires the Metal toolchain. Install [Xcode](https://developer.apple.com/xcode/) first, then:
 
-_Your operating system distribution may already have packages for AMD ROCm and CLBlast. Distro packages are often preferable, but instructions are distro-specific. Please consult distro-specific docs for dependencies if available!_
-
-Install [CLBlast](https://github.com/CNugteren/CLBlast/blob/master/doc/installation.md) and [ROCm](https://rocm.docs.amd.com/en/latest/) development packages first, as well as `cmake` and `golang`.
-
-Typically the build scripts will auto-detect ROCm, however, if your Linux distro
-or installation approach uses unusual paths, you can specify the location by
-specifying an environment variable `ROCM_PATH` to the location of the ROCm
-install (typically `/opt/rocm`), and `CLBlast_DIR` to the location of the
-CLBlast install (typically `/usr/lib/cmake/CLBlast`). You can also customize
-the AMD GPU targets by setting AMDGPU_TARGETS (e.g. `AMDGPU_TARGETS="gfx1101;gfx1102"`)
-
-```
-go generate ./...
+```shell
+xcodebuild -downloadComponent MetalToolchain
 ```
 
-Then build the binary:
+## Windows
 
+Additional prerequisites:
+
+- [Visual Studio 2022](https://visualstudio.microsoft.com/downloads/) including the Native Desktop Workload
+- (Optional) AMD GPU support
+    - [ROCm](https://rocm.docs.amd.com/en/latest/)
+- (Optional) NVIDIA GPU support
+    - [CUDA SDK](https://developer.nvidia.com/cuda-downloads?target_os=Windows&target_arch=x86_64&target_type=exe_network)
+- (Optional) Vulkan GPU support
+    - [Vulkan SDK](https://vulkan.lunarg.com/sdk/home) - useful for AMD/Intel GPUs
+- (Optional) MLX engine support
+    - [CUDA 13+ SDK](https://developer.nvidia.com/cuda-downloads)
+    - [cuDNN 9+](https://developer.nvidia.com/cudnn)
+
+For Ninja builds, run CMake from a Developer PowerShell/Command Prompt or another shell where the Visual Studio compiler is available.
+
+> Building for Vulkan requires VULKAN_SDK environment variable:
+> 
+> PowerShell
+> ```powershell
+> $env:VULKAN_SDK="C:\VulkanSDK\<version>"
+> ```
+> CMD
+> ```cmd
+> set VULKAN_SDK=C:\VulkanSDK\<version>
+> ```
+
+## Windows (ARM)
+
+Windows ARM does not support additional acceleration libraries at this time.
+
+## Linux
+
+Additional prerequisites:
+
+- (Optional) AMD GPU support
+    - [ROCm](https://rocm.docs.amd.com/projects/install-on-linux/en/latest/install/quick-start.html)
+- (Optional) NVIDIA GPU support
+    - [CUDA SDK](https://developer.nvidia.com/cuda-downloads)
+- (Optional) Vulkan GPU support
+    - [Vulkan SDK](https://vulkan.lunarg.com/sdk/home) - useful for AMD/Intel GPUs
+    - Or install via package manager: `sudo apt install vulkan-sdk` (Ubuntu/Debian) or `sudo dnf install vulkan-sdk` (Fedora/CentOS)
+- (Optional) MLX engine support
+    - [CUDA 13+ SDK](https://developer.nvidia.com/cuda-downloads)
+    - [cuDNN 9+](https://developer.nvidia.com/cudnn)
+    - OpenBLAS/LAPACK: `sudo apt install libopenblas-dev liblapack-dev liblapacke-dev` (Ubuntu/Debian)
+> [!IMPORTANT]
+> Ensure prerequisites are in `PATH` before running CMake.
+
+## MLX Engine (Optional)
+
+The MLX engine enables running safetensor based models. On macOS arm64, MLX is enabled by default. On other platforms, MLX backends are selected with `OLLAMA_MLX_BACKENDS`.
+
+### CUDA
+
+Requires CUDA 13+ and [cuDNN](https://developer.nvidia.com/cudnn) 9+.
+
+```shell
+cmake -B build . -DOLLAMA_MLX_BACKENDS=cuda_v13
+cmake --build build --parallel 8
 ```
-go build .
+
+### Local MLX source overrides
+
+To build against a local checkout of MLX and/or MLX-C (useful for development), set environment variables before running CMake:
+
+```shell
+export OLLAMA_MLX_SOURCE=/path/to/mlx
+export OLLAMA_MLX_C_SOURCE=/path/to/mlx-c
 ```
 
-ROCm requires elevated privileges to access the GPU at runtime. On most distros you can add your user account to the `render` group, or run as root.
+On macOS arm64:
 
-#### Advanced CPU Settings
-
-By default, running `go generate ./...` will compile a few different variations
-of the LLM library based on common CPU families and vector math capabilities,
-including a lowest-common-denominator which should run on almost any 64 bit CPU
-somewhat slowly. At runtime, Ollama will auto-detect the optimal variation to
-load. If you would like to build a CPU-based build customized for your
-processor, you can set `OLLAMA_CUSTOM_CPU_DEFS` to the llama.cpp flags you would
-like to use. For example, to compile an optimized binary for an Intel i9-9880H,
-you might use:
-
-```
-OLLAMA_CUSTOM_CPU_DEFS="-DLLAMA_AVX=on -DLLAMA_AVX2=on -DLLAMA_F16C=on -DLLAMA_FMA=on" go generate ./...
-go build .
+```shell
+OLLAMA_MLX_SOURCE=../mlx OLLAMA_MLX_C_SOURCE=../mlx-c cmake -B build .
+cmake --build build --parallel 8
 ```
 
-#### Containerized Linux Build
-
-If you have Docker available, you can build linux binaries with `./scripts/build_linux.sh` which has the CUDA and ROCm dependencies included. The resulting binary is placed in `./dist`
-
-### Windows
-
-Note: The Windows build for Ollama is still under development.
-
-First, install required tools:
-
-- MSVC toolchain - C/C++ and cmake as minimal requirements
-- Go version 1.22 or higher
-- MinGW (pick one variant) with GCC.
-  - [MinGW-w64](https://www.mingw-w64.org/)
-  - [MSYS2](https://www.msys2.org/)
-- The `ThreadJob` Powershell module: `Install-Module -Name ThreadJob -Scope CurrentUser`
-
-Then, build the `ollama` binary:
+For CUDA:
 
 ```powershell
-$env:CGO_ENABLED="1"
-go generate ./...
-go build .
+$env:OLLAMA_MLX_SOURCE="../mlx"
+$env:OLLAMA_MLX_C_SOURCE="../mlx-c"
+cmake -B build . -DOLLAMA_MLX_BACKENDS=cuda_v13
+cmake --build build --parallel 8
 ```
 
-#### Windows CUDA (NVIDIA)
+## Docker
 
-In addition to the common Windows development tools described above, install CUDA after installing MSVC.
+```shell
+docker build .
+```
 
-- [NVIDIA CUDA](https://docs.nvidia.com/cuda/cuda-installation-guide-microsoft-windows/index.html)
+### ROCm
 
+```shell
+docker build --build-arg FLAVOR=rocm .
+```
 
-#### Windows ROCm (AMD Radeon)
+## Running tests
 
-In addition to the common Windows development tools described above, install AMDs HIP package after installing MSVC.
+To run tests, use `go test`:
 
-- [AMD HIP](https://www.amd.com/en/developer/resources/rocm-hub/hip-sdk.html)
-- [Strawberry Perl](https://strawberryperl.com/)
+```shell
+go test ./...
+```
 
-Lastly, add `ninja.exe` included with MSVC to the system path (e.g. `C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja`).
+## Library detection
+
+Ollama looks for native helper binaries and acceleration libraries in installed and local development layouts:
+
+* `../lib/ollama` for standard installs where `ollama` is under `bin/`
+* `./lib/ollama` for Windows release-style payloads and local dist output
+* `.` for macOS release artifacts that colocate helpers with `ollama`
+* `build/lib/ollama` and `dist/<platform>/lib/ollama` for local development builds
+
+If the libraries are not found, Ollama will not run with any acceleration libraries.
